@@ -37,7 +37,7 @@ DSH 的输入区要求会话属于某个工作区；未分组会话在原生判�
 dsh plugin --profile desktop add dsh-plugin-noworkspace-session
 
 # GitHub
-dsh plugin --profile desktop add github:<owner>/dsh-plugin-noworkspace-session
+dsh plugin --profile desktop add github:yusunz/dsh-plugin-noworkspace-session
 
 # 本地 tarball
 dsh plugin --profile desktop add /absolute/path/to/dsh-plugin-noworkspace-session-0.2.0.tgz
