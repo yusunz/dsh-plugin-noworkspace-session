@@ -31,6 +31,12 @@ window.__ModuleLoader__.load({
     const ENTRY_ID = 'noworkspace-session'
     /** Owner-prop prefix that marks this plugin's sessions to the Host half. */
     const SESSION_PREFIX = 'session-nws-'
+    /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
+    const MOUNT_TITLE_PREFIX = '无项目任务 · '
+    /** How long a just-created mount is protected while `openSession` catches up. */
+    const SWEEP_GRACE_MS = 15000
+    /** A mount never seen as the current Session is held this long before it counts as abandoned. */
+    const MOUNT_MIN_AGE_MS = 60000
     const DEFAULT_DIR = '~/Documents/dsh'
 
     const zh = {
@@ -270,6 +276,11 @@ window.__ModuleLoader__.load({
         const cwd = `${base}${sep}${date}${sep}${time}`
         const sessionId = `${SESSION_PREFIX}${uid()}`
         const created = await ctx.sessions.create({ cwd, sessionId })
+        // Protect it from the very next moment: the Host mounts it while this
+        // half is still inside the wait below, and the sweep reacts to that same
+        // workspace-list change. Registering after the wait would be too late.
+        recentSessions.set(created, Date.now() + SWEEP_GRACE_MS)
+        scheduleSweep(SWEEP_GRACE_MS + 100)
         await waitForWorkspaceMount(created, cwd)
         return created
       }
@@ -299,6 +310,78 @@ window.__ModuleLoader__.load({
         }
         ctx.uiWorkspace.openSession(await createUngrouped())
       }
+
+      /**
+       * Retire a mount that no longer needs to exist: its blank session was
+       * abandoned without a first message (the sidebar hides blank rows, so the
+       * group would otherwise linger as an empty workspace), or the Host half's
+       * first-message retirement did not run.
+       *
+       * Adoption is what makes this prompt without racing the Host: a mount is
+       * held while its session is the current one and, before that, for the
+       * moment between `sessions.create` and `openSession`. The instant the
+       * session becomes current it leaves both windows, so moving elsewhere
+       * retires the group on the spot. A mount that never becomes current is
+       * held for `MOUNT_MIN_AGE_MS` in case adoption is merely slow.
+       */
+      let pendingSweep = null
+      /** Sessions this half just created: their mount is still being adopted. */
+      const recentSessions = new Map()
+      /** Scratch sessions that have been the current Session at least once. */
+      const adopted = new Set()
+      const scheduleSweep = (delayMs) => {
+        if (pendingSweep !== null) return
+        pendingSweep = setTimeout(() => { pendingSweep = null; sweep() }, delayMs)
+      }
+      /** Milliseconds since one Session row's last durable activity. */
+      const ageOf = (summary) => (typeof summary?.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0)
+      const sweep = () => {
+        const sessions = ctx.sessions.list.getSnapshot()
+        const current = mainSessionId(sessions)
+        // Before a current Session exists the app is still restoring, and a
+        // mount deleted here could be the blank Session that restore needs.
+        if (current === undefined) return
+        const currentRow = sessions.byId[current]
+        if (typeof current === 'string' && current.startsWith(SESSION_PREFIX) && currentRow?.blank === true) {
+          adopted.add(current)
+          recentSessions.delete(current)
+        }
+        const now = Date.now()
+        for (const [id, expiry] of recentSessions) if (expiry <= now) recentSessions.delete(id)
+        for (const workspace of ctx.workspaces.list.getSnapshot().items) {
+          if (typeof workspace.title !== 'string' || !workspace.title.startsWith(MOUNT_TITLE_PREFIX)) continue
+          const members = workspace.sessionIds.map((id) => sessions.byId[id])
+          if (members.some((member) => member === undefined)) continue
+          if (members.some((member) => member.id.startsWith(SESSION_PREFIX) === false)) continue
+          const blank = members.every((member) => member.blank === true)
+          // The page the operator is looking at right now.
+          if (blank && workspace.sessionIds.includes(current)) continue
+          // Still inside the creation → openSession window.
+          if (workspace.sessionIds.some((id) => recentSessions.has(id))) {
+            scheduleSweep(SWEEP_GRACE_MS)
+            continue
+          }
+          // Never adopted and still young: hold it, in case adoption is slow.
+          if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) {
+            scheduleSweep(MOUNT_MIN_AGE_MS)
+            continue
+          }
+          void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next change */ })
+        }
+      }
+
+      ctx.effect(() => {
+        const stop = ctx.sessions.list.subscribe(sweep)
+        const stopWorkspaces = ctx.workspaces.list.subscribe(sweep)
+        // A page load can start with everything already in place and no further
+        // change, so sweep once on install too (a no-op before a current Session exists).
+        sweep()
+        return () => {
+          stop()
+          stopWorkspaces()
+          if (pendingSweep !== null) { clearTimeout(pendingSweep); pendingSweep = null }
+        }
+      }, 'noworkspace-session: abandoned-mount sweep')
 
       // 1) the entry itself, in whichever additive seat this harness declares.
       //    Both registrations are inert when their slot is absent: `slots.inject`
