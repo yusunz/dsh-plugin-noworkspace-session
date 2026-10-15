@@ -181,15 +181,26 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    const svg = (children, size) => h('svg', {
+    /**
+     * One 16-unit glyph at the requested pixel size.
+     *
+     * The stroke width is compensated for the scale: the artwork is drawn on a
+     * 16-unit grid, so rendering it larger would otherwise thicken every line by
+     * the same factor and make the glyph read heavier than the icons beside it.
+     * @param children Glyph nodes.
+     * @param size Rendered square size in pixels.
+     * @param stroke Optional explicit stroke width; defaults to the scale-corrected 1.3.
+     * @returns The inline SVG element.
+     */
+    const svg = (children, size, stroke) => h('svg', {
       viewBox: '0 0 16 16', width: size, height: size, fill: 'none', stroke: 'currentColor',
-      strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round',
+      strokeWidth: stroke ?? (1.3 * 16) / size, strokeLinecap: 'round', strokeLinejoin: 'round',
       'aria-hidden': true, focusable: false, className: 'nws-chipIcon',
     }, children)
-    const icoNoWorkspace = (size = 16) => svg([
+    const icoNoWorkspace = (size = 16, stroke) => svg([
       h('path', { d: 'M1.5 4.4c0-.66.54-1.2 1.2-1.2h3l1.4 1.5h6.2c.66 0 1.2.54 1.2 1.2v6.5c0 .66-.54 1.2-1.2 1.2H2.7c-.66 0-1.2-.54-1.2-1.2V4.4Z' }),
       h('path', { d: 'M3 13 13 3' }),
-    ], size)
+    ], size, stroke)
 
     // ---- 1. hero entry: start a session outside every workspace --------
 
@@ -227,7 +238,7 @@ window.__ModuleLoader__.load({
      * @returns the element to draw.
      */
     function GuideIcon({ size }) {
-      return icoNoWorkspace(typeof size === 'number' ? size : 22)
+      return icoNoWorkspace(20, typeof size === 'number' && size < 20 ? 1.3 : undefined)
     }
 
     /**
@@ -275,7 +286,7 @@ window.__ModuleLoader__.load({
         'data-sidebar-right-guide-entry': 'noworkspace',
         onClick: () => { void onClick() },
       },
-        h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(24)),
+        h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(20)),
         h('span', { className: 'nws-cardText' },
           h('span', { className: 'nws-cardTitle' }, busy ? t('chip.busy') : title),
           // No fallback copy: the guide passes a description only while it lists
