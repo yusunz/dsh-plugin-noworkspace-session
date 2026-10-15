@@ -37,8 +37,6 @@ window.__ModuleLoader__.load({
     const ADOPTION_WINDOW_MS = 15000
     /** A mount never seen as the current Session is held this long before it counts as abandoned. */
     const MOUNT_MIN_AGE_MS = 60000
-    /** A mount this page has watched for less than this is never deleted, whatever else says. */
-    const MOUNT_MIN_OBSERVED_MS = 8000
     /** Safety-net re-check; subscriptions already retire a group the moment the operator moves away. */
     const MOUNT_SWEEP_INTERVAL_MS = 3000
     const DEFAULT_DIR = '~/Documents/dsh'
@@ -280,11 +278,14 @@ window.__ModuleLoader__.load({
         const cwd = `${base}${sep}${date}${sep}${time}`
         const sessionId = `${SESSION_PREFIX}${uid()}`
         const created = await ctx.sessions.create({ cwd, sessionId })
-        // Protect it from the very next moment: the Host mounts it while this
-        // half is still inside the wait below, and the sweep reacts to that same
-        // workspace-list change. Registering after the wait would be too late.
-        recentSessions.set(created, Date.now() + ADOPTION_WINDOW_MS)
+        // Protected from the very next moment until it turns current: the Host
+        // mounts it while this half is still inside the wait below, and the
+        // sweep reacts to that same workspace-list change. Registering after the
+        // wait would be too late, and a plain time window would delay the
+        // retirement of a mount the operator has already left.
+        adopting.set(created, Date.now() + ADOPTION_WINDOW_MS)
         await waitForWorkspaceMount(created, cwd)
+        ctx.uiWorkspace.openSession(created)
         return created
       }
 
@@ -303,7 +304,10 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** Chip action: reuse the current blank scratch session, else create and open one. */
+      /**
+       * Chip action: reuse the current blank scratch session, else create one —
+       * `createUngrouped` opens it once the Host has mounted it.
+       */
       const start = async () => {
         const list = ctx.sessions.list.getSnapshot()
         const current = mainSessionId(list)
@@ -311,7 +315,7 @@ window.__ModuleLoader__.load({
           ctx.uiWorkspace.openSession(current)
           return
         }
-        ctx.uiWorkspace.openSession(await createUngrouped())
+        await createUngrouped()
       }
 
       /**
@@ -327,17 +331,15 @@ window.__ModuleLoader__.load({
        * retires the group on the spot. A mount that never becomes current is
        * held for `MOUNT_MIN_AGE_MS` in case adoption is merely slow.
        */
-      /** Sessions this half just created: their mount is still being adopted. */
-      const recentSessions = new Map()
+      /**
+       * Sessions created on this page that `openSession` has not adopted yet:
+       * the only window where a mount must survive while it is neither current
+       * nor watched. Cleared the moment the session turns current, with a time
+       * fallback in case that never happens.
+       */
+      const adopting = new Map()
       /** Scratch sessions that have been the current Session at least once. */
       const adopted = new Set()
-      /**
-       * When this page first saw each mount. Independent of `recentSessions`,
-       * which only exists when this page load created the session: a mount
-       * restored by a reload, or one whose create-time registration was lost,
-       * gets the same protection from simple observation.
-       */
-      const firstSeen = new Map()
       /** Milliseconds since one Session row's last durable activity. */
       const ageOf = (summary) => (typeof summary?.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0)
       const sweep = () => {
@@ -348,24 +350,25 @@ window.__ModuleLoader__.load({
         if (current === undefined) return
         const currentRow = sessions.byId[current]
         if (typeof current === 'string' && current.startsWith(SESSION_PREFIX) && currentRow?.blank === true) {
+          // Adoption complete: from here the session is an ordinary page, and
+          // leaving it must retire the mount on the spot.
           adopted.add(current)
-          recentSessions.delete(current)
+          adopting.delete(current)
         }
         const now = Date.now()
-        for (const [id, expiry] of recentSessions) if (expiry <= now) recentSessions.delete(id)
+        for (const [id, deadline] of adopting) if (deadline <= now) adopting.delete(id)
         for (const workspace of ctx.workspaces.list.getSnapshot().items) {
           if (typeof workspace.title !== 'string' || !workspace.title.startsWith(MOUNT_TITLE_PREFIX)) continue
-          if (!firstSeen.has(workspace.workspaceId)) firstSeen.set(workspace.workspaceId, now)
-          if (now - firstSeen.get(workspace.workspaceId) < MOUNT_MIN_OBSERVED_MS) continue
+          // Still inside the creation → openSession window.
+          if (workspace.sessionIds.some((id) => adopting.has(id))) continue
           const members = workspace.sessionIds.map((id) => sessions.byId[id])
           if (members.some((member) => member === undefined)) continue
           if (members.some((member) => member.id.startsWith(SESSION_PREFIX) === false)) continue
           const blank = members.every((member) => member.blank === true)
           // The page the operator is looking at right now.
           if (blank && workspace.sessionIds.includes(current)) continue
-          // Still inside the creation → openSession window.
-          if (workspace.sessionIds.some((id) => recentSessions.has(id))) continue
-          // Never adopted and still young: hold it, in case adoption is slow.
+          // Never adopted and its session is still young: hold it, in case
+          // adoption is slow or the page was reloaded mid-adoption.
           if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) continue
           console.info('[noworkspace] retiring mount', workspace.title, { blank, adopted: members.map((member) => adopted.has(member.id)) })
           void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
