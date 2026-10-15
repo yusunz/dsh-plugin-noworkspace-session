@@ -27,8 +27,18 @@ window.__ModuleLoader__.load({
     const { useState } = React
 
     const NS = 'noworkspace'
-    /** Loader row id in cordis.patch.yml; also the config-form namespace. */
+    /** `id` of this plugin's row in cordis.patch.yml; the loader may qualify it for us. */
     const ENTRY_ID = 'noworkspace-session'
+    /**
+     * Settings namespaces this plugin's row may appear under. The Host keys a
+     * config form by the loader *entry* id, which is the patch id with an
+     * `include:` qualifier, and a bundle re-export can add the package name; the
+     * probing client reports `unavailable` for every spelling it does not serve,
+     * so the served one is picked from the describe mirror instead of assumed.
+     */
+    const ENTRY_IDS = [ENTRY_ID, `include:${ENTRY_ID}`, 'dsh-plugin-noworkspace-session']
+    /** Distinctive fragment that identifies this plugin's namespace in the mirror. */
+    const NAMESPACE_HINT = 'noworkspace'
     /** Owner-prop prefix that marks this plugin's sessions to the Host half. */
     const SESSION_PREFIX = 'session-nws-'
     /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
@@ -431,26 +441,44 @@ window.__ModuleLoader__.load({
         inject: () => ({ start, seatTaken: () => heroSeatLive }),
       }, DockChip)), 'noworkspace-session: composer dock chip')
 
-      // 2) settings row — only when the config-form mirror is present
+      // 2) settings row — only while the Host actually serves our namespace.
+      //    The namespace is the loader *entry* id, which carries the `include:`
+      //    qualifier (`include:noworkspace-session`), so it is read from the
+      //    describe mirror instead of hardcoded: a wrong id reports `unavailable`
+      //    forever and leaves the row permanently unwritable.
       ctx.inject(['configForms'], (child) => {
-        const form = child.configForms.get(ENTRY_ID)
-        const change = async () => {
-          const path = await ctx.uiWorkspace.pickDirectory()
-          if (!path) return
-          const ok = await form.set('defaultDir', path)
-          if (!ok) throw new Error(t('settings.writeFailed'))
+        const forms = child.configForms
+        const mirror = forms.describe()
+        const servedNamespaces = () => (mirror.getSnapshot()?.view?.namespaces ?? [])
+          .map((view) => view.ns)
+          .filter((name) => typeof name === 'string')
+        const pickNamespace = () => {
+          const served = servedNamespaces()
+          return served.find((name) => name.includes(NAMESPACE_HINT))
+            ?? ENTRY_IDS.find((id) => served.includes(id))
+            ?? ENTRY_ID
         }
-        const reset = async () => {
-          const ok = await form.unset('defaultDir')
-          if (!ok) throw new Error(t('settings.writeFailed'))
-        }
-        child.effect(() => child.slots.inject('settings.general.item', () => child.slots.register({
-          name: 'settings.general.item',
-          id: 'noworkspace-default-dir',
-          order: 50,
-          locale: NS,
-          inject: () => ({ hooks: { dirForm: form }, change, reset, homeOf: hostHome }),
-        }, DefaultDirRow)), 'noworkspace-session: settings row')
+        child.effect(() => forms.whileServed(ENTRY_IDS, (served) => {
+          const namespace = [...served].find((name) => name.includes(NAMESPACE_HINT)) ?? pickNamespace()
+          const form = forms.get(namespace)
+          const change = async () => {
+            const path = await ctx.uiWorkspace.pickDirectory()
+            if (!path) return
+            const ok = await form.set('defaultDir', path)
+            if (!ok) throw new Error(t('settings.writeFailed'))
+          }
+          const reset = async () => {
+            const ok = await form.unset('defaultDir')
+            if (!ok) throw new Error(t('settings.writeFailed'))
+          }
+          return child.slots.inject('settings.general.item', () => child.slots.register({
+            name: 'settings.general.item',
+            id: 'noworkspace-default-dir',
+            order: 50,
+            locale: NS,
+            inject: () => ({ hooks: { dirForm: form }, change, reset, homeOf: hostHome }),
+          }, DefaultDirRow))
+        }), 'noworkspace-session: settings row')
       })
     }
 
