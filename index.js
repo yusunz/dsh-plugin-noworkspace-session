@@ -15,12 +15,10 @@
  * and retires that workspace as soon as the first user message lands. The
  * session then falls back to Ungrouped, which is where it was meant to live.
  *
- * Two triggers drive the mount: the documented `api-session/added` event, and —
- * because the event path's delivery to a plugin listener has been unreliable in
- * practice on the desktop build — a scan of the live Session store. Both resolve
- * the workspace registry through `inject` first, with a dynamic lookup only as a
- * fallback, and both write to a diagnostic log while this behaviour is being
- * verified.
+ * The registry is resolved from the root context at call time. It is deliberately
+ * NOT taken from `ctx.inject(['workspaceRegistry'], …)`: on the desktop build the
+ * injected instance accepted the call but never settled `resolveByPath`, so every
+ * mount stayed pending and the composer stayed inert.
  */
 import { appendFileSync, mkdirSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
@@ -39,11 +37,9 @@ export const Config = z.object({
 
 /** Session-id prefix the browser half mints; the Host half recognizes its own sessions by it. */
 const SESSION_PREFIX = 'session-nws-'
-/** Temporary-workspace title prefix, used to recognize this plugin's own mounts. */
+/** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
-/** Only freshly created sessions are mounted, so restoring history never picks up a stale session. */
-const FRESH_MS = 300000
-/** Diagnostic sink; remove with the diagnostic calls once the trigger path is settled. */
+/** Diagnostic sink; remove together with the dbg calls once this behaviour is settled. */
 const DEBUG_LOG = `${process.env.TEMP ?? 'C:\\Windows\\Temp'}\\nws-probe\\host.log`
 
 /** Append one diagnostic line; diagnostics never affect behaviour. */
@@ -67,12 +63,6 @@ function stamp() {
  * @param ctx Plugin context; `settings` is optional and skipped when absent.
  */
 export function apply(ctx) {
-  dbg({
-    stage: 'apply',
-    hasRoot: typeof ctx.root, hasGet: typeof ctx.get, hasOn: typeof ctx.on,
-    hasLogger: typeof ctx.logger, hasInject: typeof ctx.inject, hasEffect: typeof ctx.effect,
-  })
-
   ctx.inject(['settings'], (child) => {
     child.effect(
       () => child.settings.configure({ auto: false }, ctx.fiber),
@@ -80,15 +70,7 @@ export function apply(ctx) {
     )
   })
 
-  /**
-   * The registry resolved from the root context, lazily at call time.
-   *
-   * Deliberately NOT taken from `ctx.inject(['workspaceRegistry'], …)`: on the
-   * desktop build the injected instance accepts the call but never settles
-   * `resolveByPath`, which left every mount pending and the composer inert. The
-   * root lookup returns the live service and has been reliable (verified against
-   * a hot-reloaded instance of this same module).
-   */
+  /** The live workspace registry, resolved lazily from the root context. */
   const registryOf = () => {
     try {
       const registry = ctx.root?.get?.('workspaceRegistry') ?? ctx.get('workspaceRegistry')
@@ -99,66 +81,65 @@ export function apply(ctx) {
       return undefined
     }
   }
-  dbg({ stage: 'registry-now', type: typeof registryOf() })
 
-  /** Sessions already handled, so neither trigger mounts one twice. */
-  const handled = new Set()
-  const consider = (sessionId, cwd, via) => {
-    if (handled.has(sessionId)) return
-    handled.add(sessionId)
-    dbg({ stage: 'consider', sessionId, cwd, via })
-    void mount(registryOf(), sessionId, cwd, via)
+  /** Operator-facing warning: the session logger, mirrored into the diagnostic sink. */
+  const warn = (message) => {
+    try { ctx.logger?.warn?.('noworkspace-session: %s', message) } catch { /* logger is optional */ }
+    dbg({ stage: 'warn', message })
   }
 
-  // A session of ours was created: `summary.cwd` is the directory it just made.
+  /** Sessions already handled, so a retirement is never undone by a later announcement. */
+  const handled = new Set()
+  const consider = (sessionId, cwd) => {
+    if (handled.has(sessionId)) return
+    handled.add(sessionId)
+    dbg({ stage: 'consider', sessionId, cwd })
+    void mount(registryOf(), sessionId, cwd, warn)
+  }
+
+  // A session of ours was announced: mount it while it is still blank, which is
+  // both the freshly created case and a blank scratch session restored at
+  // startup. A session that already carries history needs no mount.
   ctx.on('api-session/added', (summary) => {
     dbg({
       stage: 'event-added',
       id: summary?.sessionId, blank: summary?.blank, cwd: summary?.cwd,
-      updatedAt: summary?.updatedAt, keys: summary === undefined ? null : Object.keys(summary),
+      updatedAt: summary?.updatedAt,
     })
     if (summary === undefined || typeof summary.sessionId !== 'string') return
     if (!summary.sessionId.startsWith(SESSION_PREFIX)) return
     if (summary.blank !== true) return
-    const age = typeof summary.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0
-    if (age > FRESH_MS) return
-    consider(summary.sessionId, summary.cwd, 'event')
+    consider(summary.sessionId, summary.cwd)
   })
 
-  // The first user-authored durable message: the mount has done its job.
+  // The first user-authored durable message: the mount has done its job and
+  // Ungrouped is the session's real home.
   ctx.on('api-session/activity', (sessionId) => {
     dbg({ stage: 'event-activity', sessionId })
     if (typeof sessionId !== 'string') return
     void unmount(registryOf(), sessionId)
   })
 
-  // Fallback trigger: the live Session store, independent of event delivery.
-  const scan = () => {
-    try {
-      const store = ctx.root?.get?.('sessions') ?? ctx.get('sessions')
-      const list = store !== undefined && typeof store.list === 'function' ? store.list() : undefined
-      if (!Array.isArray(list)) return
-      for (const session of list) {
-        const header = session?.header ?? {}
-        const id = session?.id ?? header.id
-        if (typeof id !== 'string' || !id.startsWith(SESSION_PREFIX)) continue
-        if (handled.has(id)) continue
-        const age = typeof header.createdAt === 'number' ? Date.now() - header.createdAt : 0
-        if (age > FRESH_MS) { handled.add(id); continue }
-        consider(id, header.cwd, 'scan')
+  // A previous process can leave mounts behind (crash, upgrade, or an earlier
+  // build): retire every workspace whose members are all sessions of ours. Keyed
+  // on membership rather than on the title, so mounts from older prefixes are
+  // collected too. The operator's own workspaces never hold this plugin's ids.
+  void (async () => {
+    const registry = registryOf()
+    if (registry === undefined) return
+    for (const workspace of registry.list()) {
+      const members = [...workspace.sessionIds]
+      if (members.length === 0) continue
+      if (!members.every((id) => id.startsWith(SESSION_PREFIX))) continue
+      try {
+        await registry.delete(workspace.id)
+        dbg({ stage: 'startup-sweep', ok: true, title: workspace.title, members })
+      } catch (error) {
+        dbg({ stage: 'startup-sweep', ok: false, title: workspace.title, message: String(error?.message ?? error) })
       }
-    } catch (error) {
-      dbg({ stage: 'scan-throw', message: String(error?.message ?? error) })
     }
-  }
-  const handle = setInterval(scan, 2000)
-  try {
-    ctx.effect(() => () => { clearInterval(handle) }, 'noworkspace-session: mount fallback scan')
-  } catch (error) {
-    dbg({ stage: 'effect-throw', message: String(error?.message ?? error) })
-  }
-  scan()
-  dbg({ stage: 'ready' })
+    dbg({ stage: 'ready' })
+  })()
 }
 
 /**
@@ -167,9 +148,9 @@ export function apply(ctx) {
  * @param registry Host workspace registry, when the profile composes one.
  * @param sessionId Session to mount.
  * @param cwd The session's project directory (the task folder).
- * @param via Which trigger asked for the mount.
+ * @param warn Operator-facing warning sink.
  */
-async function mount(registry, sessionId, cwd, via) {
+async function mount(registry, sessionId, cwd, warn) {
   if (registry === undefined) { dbg({ stage: 'mount-no-registry', sessionId }); return }
   try {
     if (registry.list().some(workspace => workspace.sessionIds.includes(sessionId))) {
@@ -184,12 +165,14 @@ async function mount(registry, sessionId, cwd, via) {
     const workspace = existing ?? await registry.create(cwd, `${MOUNT_TITLE_PREFIX}${stamp()}`)
     await workspace.attachSession(sessionId)
     dbg({
-      stage: 'mount', ok: true, via, sessionId, cwd,
+      stage: 'mount', ok: true, sessionId, cwd,
       reused: existing !== undefined, workspaceId: workspace.id, title: workspace.title,
-      sessionIds: [...workspace.sessionIds],
     })
   } catch (error) {
-    dbg({ stage: 'mount', ok: false, via, sessionId, cwd, message: String(error?.message ?? error), stack: String(error?.stack ?? '').slice(0, 900) })
+    // Everything still works without the mount: the hero keeps its native
+    // "choose a workspace" state, so this is a warning rather than a failure.
+    warn(`could not mount session ${sessionId} at ${String(cwd)}: ${String(error)}`)
+    dbg({ stage: 'mount', ok: false, sessionId, cwd, message: String(error?.message ?? error), stack: String(error?.stack ?? '').slice(0, 900) })
   }
 }
 
