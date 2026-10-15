@@ -2,9 +2,12 @@
  * dsh-plugin-noworkspace-session — browser half.
  *
  * Two registrations, both additive — this plugin replaces no host UI:
- *   1. `conversation.hero.options` (list): one chip beside the native workspace
- *      picker that starts a session outside every workspace. The shipped picker
- *      stays untouched, so its menu, modal and directory flow remain native.
+ *   1. `conversation.input.dock` (list): one chip that starts a session outside
+ *      every workspace. `conversation.hero.options` — the seat that would put it
+ *      inside the hero row — is declared by newer harness builds only, so the
+ *      registration is attempted there first and the dock takes over when the
+ *      seat is absent. The shipped workspace picker is never touched, so its
+ *      menu, modal and directory flow stay native.
  *   2. `settings.general.item` (list): the Codex-style default-folder row, read
  *      and written through the config form mirror (persists into the profile
  *      cordis.patch.yml).
@@ -14,8 +17,7 @@
  * mounts the blank session in a temporary workspace at its own cwd, which makes
  * the native composer live; the first user message then retires that workspace
  * and the session falls back to Ungrouped. This half only waits for the mount
- * before opening the session, and sweeps workspaces whose blank session was
- * abandoned without a first message.
+ * before opening the session.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-plugin-noworkspace-session',
