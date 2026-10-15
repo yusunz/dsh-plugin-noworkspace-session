@@ -61,15 +61,22 @@ window.__ModuleLoader__.load({
       'settings.writeFailed': 'The host rejected this write',
     }
 
-    /* Chip geometry mirrors the agent-preset seat beside it
+    /* Chip geometry mirrors the agent-preset seat in the hero row
        (ui-agent-preset AgentPresetSeat.module.css): same min-height, 8px side
-       padding, 4px gap and hover fill. Harness builds without
-       `conversation.hero.options` have no additive seat in that row, so the chip
-       rides the composer dock — the full-width line between the hero row and the
-       input card — aligned with the card like the goal bar is. */
+       padding, 4px gap and hover fill, so the two read as one line.
+       Harness builds without `conversation.hero.options` offer no additive seat
+       in that row, so the chip rides the composer dock and lifts itself onto the
+       row's baseline instead: the dock row collapses to zero height with -3px
+       vertical margins (cancelling the two stack gaps it would otherwise add),
+       and the chip is anchored one stack gap above it, right-aligned to the card
+       edge opposite the workspace chip.
+       The lifted box spans the row's width but must stay transparent to pointer
+       events — otherwise it would swallow clicks on the native workspace chip
+       sitting in the same line. */
     const CSS = `
-.nws-dock{box-sizing:border-box;display:flex;justify-content:flex-start;width:100%;padding:0 var(--dsh-composer-side-clearance,0px)}
-.nws-dockInner{display:flex;width:100%;max-width:calc(var(--dsh-composer-card-max-width,952px) - 4 * var(--dsh-composer-dock-inset,4px));margin:0 auto}
+.nws-dock{position:relative;height:0;display:flex;justify-content:flex-end;margin:-3px 0}
+.nws-dockInner{position:absolute;left:0;right:0;bottom:calc(100% + var(--dsh-composer-stack-gap,6px));display:flex;justify-content:flex-end;max-width:calc(var(--dsh-composer-card-max-width,952px) - 4 * var(--dsh-composer-dock-inset,4px));margin:0 auto;pointer-events:none}
+.nws-dockInner>*{pointer-events:auto}
 .nws-chip{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:min(100%,240px);min-height:28px;padding:0 8px;border:none;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer}
 .nws-chip:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover)}
 .nws-chip:disabled{cursor:default;color:var(--dsw-alias-label-secondary)}
