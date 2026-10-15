@@ -45,6 +45,8 @@ export const Config = z.object({
 
 /** Session-id prefix the browser half mints; the Host half recognizes its own sessions by it. */
 const SESSION_PREFIX = 'session-nws-'
+/** Fragment identifying this plugin's settings namespace in the Host descriptors. */
+const ENTRY_HINT = 'noworkspace-session'
 /** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
 /** Task-folder naming this plugin mints: `<base>\<YYYY-MM-DD>\<HH-MM-SS>`. */
@@ -76,15 +78,32 @@ function warn(ctx, message) {
 /**
  * The bundle ships its own General-settings row, so suppress the
  * auto-generated settings page for this entry.
+ *
+ * This declaration is also where the effective `defaultDir` is read from: the
+ * descriptor carries the value the operator's profile patch resolved to, whereas
+ * the `config` argument is the entry's own composition and can still hold the
+ * schema default when the row was written from the client.
  * @param ctx Plugin context; `settings` is optional and skipped when absent.
- * @param config Resolved plugin config; `defaultDir` seeds the startup sweep.
+ * @param config Loader-provided config, used only as a fallback.
  */
 export function apply(ctx, config) {
+  /** Effective task-folder setting, falling back to the loader-provided value. */
+  const fromConfig = () => (typeof config?.defaultDir === 'string' ? config.defaultDir : undefined)
+  let readConfiguredDir = fromConfig
   ctx.inject(['settings'], (child) => {
     child.effect(
       () => child.settings.configure({ auto: false }, ctx.fiber),
       'noworkspace-session: settings presentation',
     )
+    readConfiguredDir = () => {
+      try {
+        const row = child.settings.describe?.()
+          .find((entry) => typeof entry?.ns === 'string' && entry.ns.includes(ENTRY_HINT))
+        const value = row?.value?.defaultDir
+        if (typeof value === 'string' && value.trim() !== '') return value
+      } catch { /* fall through to the loader-provided config */ }
+      return fromConfig()
+    }
   })
 
   /** The live workspace registry, resolved lazily from the root context. */
@@ -126,7 +145,7 @@ export function apply(ctx, config) {
       // Maintenance must never be able to take the Host down: an unhandled
       // rejection here exits the desktop process, so every failure stays local.
       try {
-        await retireEmptyTaskFolders(ctx, config, report)
+        await retireEmptyTaskFolders(ctx, readConfiguredDir, report)
       } catch (error) {
         report(`empty task folder sweep skipped: ${String(error)}`)
       }
@@ -181,15 +200,12 @@ export function apply(ctx, config) {
 
 /**
  * The configured task-folder root with `~` expanded, or undefined when the
- * plugin has no usable path. The value comes from the plugin's own config, which
- * the Loader passes as `apply`'s second argument — it must NOT be read as
- * `ctx.config`, which throws unless the `config` service is injected (that is
- * what once took the desktop host down).
- * @param config Resolved plugin config.
+ * plugin has no usable path.
+ * @param raw Configured path, from the effective settings value.
  * @returns An absolute path, or undefined.
  */
-function taskFolderRoot(config) {
-  const raw = typeof config?.defaultDir === 'string' ? config.defaultDir : DEFAULT_DIR
+function taskFolderRoot(raw) {
+  if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
   if (trimmed === '') return undefined
   const expanded = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')
@@ -206,11 +222,11 @@ function taskFolderRoot(config) {
  * once its last task folder is gone. Sessions themselves are never deleted —
  * the Host exposes no such call.
  * @param ctx Plugin context; `sessions` is the Host store and is optional.
- * @param config Resolved plugin config.
+ * @param readDir Resolves the configured task-folder root at sweep time.
  * @param report Operator-facing diagnostic sink.
  */
-async function retireEmptyTaskFolders(ctx, config, report) {
-  const root = taskFolderRoot(config)
+async function retireEmptyTaskFolders(ctx, readDir, report) {
+  const root = taskFolderRoot(readDir())
   if (root === undefined) return
   let dates
   try {
