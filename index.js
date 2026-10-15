@@ -46,7 +46,7 @@ export const Config = z.object({
 /** Session-id prefix the browser half mints; the Host half recognizes its own sessions by it. */
 const SESSION_PREFIX = 'session-nws-'
 /** Fragment identifying this plugin's settings namespace in the Host descriptors. */
-const ENTRY_HINT = 'noworkspace-session'
+const ENTRY_HINT = 'noworkspace'
 /** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
 /** Task-folder naming this plugin mints: `<base>\<YYYY-MM-DD>\<HH-MM-SS>`. */

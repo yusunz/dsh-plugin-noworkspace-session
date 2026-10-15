@@ -37,3 +37,4 @@
 | `cordis.patch.yml` | Loader patch：insert `noworkspace-session` row |
 | `交接文档.md` | 面向接手者的现状与坑（含源码依据） |
 | `项目日志.md` | 开发过程与决策记录 |
+| `tests/apply-smoke.mjs` | 回归冒烟：用模仿 cordis 服务守卫的 mock ctx 调 `apply()`，验证清扫行为与"无未捕获拒绝"（`node tests/apply-smoke.mjs`） |
