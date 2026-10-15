@@ -53,6 +53,7 @@ window.__ModuleLoader__.load({
       'settings.reset': '重置',
       'settings.error': '保存失败：{message}',
       'settings.writeFailed': '宿主拒绝了这次写入',
+      'settings.unavailable': '该设置项在宿主中不可写（配置命名空间未暴露）',
     }
 
     const en = {
@@ -67,6 +68,7 @@ window.__ModuleLoader__.load({
       'settings.reset': 'Reset',
       'settings.error': 'Save failed: {message}',
       'settings.writeFailed': 'The host rejected this write',
+      'settings.unavailable': 'This setting is not writable on the host (config namespace not exposed)',
     }
 
     /* Chip geometry mirrors the agent-preset seat in the hero row
@@ -209,18 +211,31 @@ window.__ModuleLoader__.load({
 
     // ---- 2. settings row ----------------------------------------------
 
-    /** Codex-style row: current folder + Change/Reset over the config form mirror. */
+    /**
+     * Codex-style row: current folder + Change/Reset over the config form mirror.
+     *
+     * The buttons only stay disabled while a write is in flight, or when the Host
+     * reports the namespace as not exposed at all. Gating on `status === 'ready'`
+     * or `writable` looks stricter but leaves the row permanently inert whenever
+     * the mirror still reports `loading`, which is indistinguishable from a
+     * broken write and takes the operator's only recovery action away.
+     */
     function DefaultDirRow({ useDirForm, change, reset, homeOf, t }) {
       const snap = useDirForm((s) => s)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
-      const raw = snap && typeof snap.value === 'object' && snap.value && typeof snap.value.defaultDir === 'string' && snap.value.defaultDir.trim() !== ''
-        ? snap.value.defaultDir
+      const value = snap?.value
+      const raw = value !== null && typeof value === 'object' && typeof value.defaultDir === 'string' && value.defaultDir.trim() !== ''
+        ? value.defaultDir.trim()
         : DEFAULT_DIR
       let shown = raw
       try { shown = expandHome(raw, homeOf()) } catch { shown = raw }
-      const writable = snap === undefined || snap.status === undefined ? false : (snap.status === 'ready' && snap.writable !== false)
-      const overridden = snap !== undefined && snap.user !== undefined
+      // `user` is the raw user layer: a field's presence there is what marks it
+      // overridden, so comparing values would miss an override equal to the default.
+      const userLayer = snap?.user
+      const overridden = userLayer !== null && typeof userLayer === 'object'
+        && Object.prototype.hasOwnProperty.call(userLayer, 'defaultDir')
+      const unavailable = snap !== undefined && snap.status === 'unavailable'
       const run = async (fn) => {
         if (busy) return
         setBusy(true)
@@ -231,11 +246,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'nws-rowMain' },
           h('div', { className: 'nws-rowTitle' }, t('settings.title')),
           h('div', { className: 'nws-rowDesc' }, t('settings.description')),
-          error !== null && h('div', { className: 'nws-rowError', role: 'alert' }, t('settings.error', { message: error }))),
+          error !== null && h('div', { className: 'nws-rowError', role: 'alert' }, t('settings.error', { message: error })),
+          unavailable && h('div', { className: 'nws-rowError', role: 'alert' }, t('settings.unavailable'))),
         h('div', { className: 'nws-rowControls' },
           h('span', { className: 'nws-path', title: shown }, shown),
-          h('button', { type: 'button', className: 'nws-btn', disabled: !writable || busy, onClick: () => void run(change) }, t('settings.change')),
-          h('button', { type: 'button', className: 'nws-btn nws-btnQuiet', disabled: !writable || !overridden || busy, onClick: () => void run(reset) }, t('settings.reset'))))
+          h('button', { type: 'button', className: 'nws-btn', disabled: busy || unavailable, onClick: () => void run(change) }, t('settings.change')),
+          h('button', { type: 'button', className: 'nws-btn nws-btnQuiet', disabled: busy || unavailable || !overridden, onClick: () => void run(reset) }, t('settings.reset'))))
     }
 
     // ---- assembly -------------------------------------------------------
