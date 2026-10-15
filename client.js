@@ -279,10 +279,28 @@ window.__ModuleLoader__.load({
       const hostHome = () => {
         try { return ctx.remote && ctx.remote.$host ? ctx.remote.$host.home : undefined } catch { return undefined }
       }
+      /** Config-form service; captured from the optional declaration, so a profile without it stays usable. */
+      let configForms
+      /**
+       * The settings namespace the Host actually serves for this plugin, read from
+       * the describe mirror: it is the loader *entry* id (`include:`-qualified),
+       * and a wrong guess answers `unavailable` forever.
+       */
+      const resolveNamespace = () => {
+        try {
+          const forms = configForms ?? ctx.get('configForms')
+          const served = (forms?.describe?.().getSnapshot()?.view?.namespaces ?? [])
+            .map((view) => view.ns)
+            .filter((name) => typeof name === 'string')
+          return served.find((name) => name.includes(NAMESPACE_HINT))
+            ?? ENTRY_IDS.find((id) => served.includes(id))
+            ?? ENTRY_ID
+        } catch { return ENTRY_ID }
+      }
       const readDefaultDir = () => {
         try {
-          const forms = ctx.get('configForms')
-          const form = forms ? forms.get(ENTRY_ID) : undefined
+          const forms = configForms ?? ctx.get('configForms')
+          const form = forms ? forms.get(resolveNamespace()) : undefined
           const snap = form ? form.getSnapshot() : undefined
           const v = snap && snap.value ? snap.value.defaultDir : undefined
           if (typeof v === 'string' && v.trim() !== '') return v.trim()
@@ -448,18 +466,9 @@ window.__ModuleLoader__.load({
       //    forever and leaves the row permanently unwritable.
       ctx.inject(['configForms'], (child) => {
         const forms = child.configForms
-        const mirror = forms.describe()
-        const servedNamespaces = () => (mirror.getSnapshot()?.view?.namespaces ?? [])
-          .map((view) => view.ns)
-          .filter((name) => typeof name === 'string')
-        const pickNamespace = () => {
-          const served = servedNamespaces()
-          return served.find((name) => name.includes(NAMESPACE_HINT))
-            ?? ENTRY_IDS.find((id) => served.includes(id))
-            ?? ENTRY_ID
-        }
+        configForms = forms
         child.effect(() => forms.whileServed(ENTRY_IDS, (served) => {
-          const namespace = [...served].find((name) => name.includes(NAMESPACE_HINT)) ?? pickNamespace()
+          const namespace = [...served].find((name) => name.includes(NAMESPACE_HINT)) ?? resolveNamespace()
           const form = forms.get(namespace)
           const change = async () => {
             const path = await ctx.uiWorkspace.pickDirectory()
