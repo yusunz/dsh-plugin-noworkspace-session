@@ -37,6 +37,8 @@ window.__ModuleLoader__.load({
     const ADOPTION_WINDOW_MS = 15000
     /** A mount never seen as the current Session is held this long before it counts as abandoned. */
     const MOUNT_MIN_AGE_MS = 60000
+    /** A mount this page has watched for less than this is never deleted, whatever else says. */
+    const MOUNT_MIN_OBSERVED_MS = 8000
     /** Safety-net re-check; subscriptions already retire a group the moment the operator moves away. */
     const MOUNT_SWEEP_INTERVAL_MS = 3000
     const DEFAULT_DIR = '~/Documents/dsh'
@@ -329,6 +331,13 @@ window.__ModuleLoader__.load({
       const recentSessions = new Map()
       /** Scratch sessions that have been the current Session at least once. */
       const adopted = new Set()
+      /**
+       * When this page first saw each mount. Independent of `recentSessions`,
+       * which only exists when this page load created the session: a mount
+       * restored by a reload, or one whose create-time registration was lost,
+       * gets the same protection from simple observation.
+       */
+      const firstSeen = new Map()
       /** Milliseconds since one Session row's last durable activity. */
       const ageOf = (summary) => (typeof summary?.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0)
       const sweep = () => {
@@ -346,6 +355,8 @@ window.__ModuleLoader__.load({
         for (const [id, expiry] of recentSessions) if (expiry <= now) recentSessions.delete(id)
         for (const workspace of ctx.workspaces.list.getSnapshot().items) {
           if (typeof workspace.title !== 'string' || !workspace.title.startsWith(MOUNT_TITLE_PREFIX)) continue
+          if (!firstSeen.has(workspace.workspaceId)) firstSeen.set(workspace.workspaceId, now)
+          if (now - firstSeen.get(workspace.workspaceId) < MOUNT_MIN_OBSERVED_MS) continue
           const members = workspace.sessionIds.map((id) => sessions.byId[id])
           if (members.some((member) => member === undefined)) continue
           if (members.some((member) => member.id.startsWith(SESSION_PREFIX) === false)) continue
@@ -356,6 +367,7 @@ window.__ModuleLoader__.load({
           if (workspace.sessionIds.some((id) => recentSessions.has(id))) continue
           // Never adopted and still young: hold it, in case adoption is slow.
           if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) continue
+          console.info('[noworkspace] retiring mount', workspace.title, { blank, adopted: members.map((member) => adopted.has(member.id)) })
           void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
         }
       }
