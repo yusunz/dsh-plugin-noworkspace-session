@@ -20,6 +20,9 @@
  * injected instance accepted the call but never settled `resolveByPath`, so every
  * mount stayed pending and the composer stayed inert.
  */
+import { readdir, rmdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 /** Default task folder before an operator overrides it in Settings. `~` is expanded in the browser. */
@@ -44,6 +47,15 @@ export const Config = z.object({
 const SESSION_PREFIX = 'session-nws-'
 /** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
+/** Task-folder naming this plugin mints: `<base>\<YYYY-MM-DD>\<HH-MM-SS>`. */
+const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}$/
+const TIME_FOLDER = /^\d{2}-\d{2}-\d{2}$/
+/**
+ * Delay before the empty-folder sweep. The live-session list is what protects a
+ * folder the operator is actually using, and that list only fills once the
+ * renderer has restored its session, so the sweep must not run at attach time.
+ */
+const STARTUP_SETTLE_MS = 30000
 
 /** Local wall clock as `HH-MM-SS`, matching the task folder next to it. */
 function stamp() {
@@ -61,8 +73,9 @@ function warn(ctx, message) {
  * The bundle ships its own General-settings row, so suppress the
  * auto-generated settings page for this entry.
  * @param ctx Plugin context; `settings` is optional and skipped when absent.
+ * @param config Resolved plugin config; `defaultDir` seeds the startup sweep.
  */
-export function apply(ctx) {
+export function apply(ctx, config) {
   ctx.inject(['settings'], (child) => {
     child.effect(
       () => child.settings.configure({ auto: false }, ctx.fiber),
@@ -106,21 +119,126 @@ export function apply(ctx) {
     void unmount(registryOf(), sessionId, report)
   })
 
-  // A previous process can leave mounts behind (crash, upgrade, or an earlier
-  // build): retire every workspace whose members are all sessions of ours. Keyed
-  // on membership rather than on the title, so mounts from older prefixes are
-  // collected too. The operator's own workspaces never hold this plugin's ids.
-  // The registry may not be composed yet while this plugin applies, so retry.
+  // Two startup duties, each with its own precondition.
+  //
+  // 1. A previous process can leave mounts behind (crash, upgrade, or an earlier
+  //    build): retire every workspace whose members are all sessions of ours.
+  //    Keyed on membership rather than the title, so mounts from older prefixes
+  //    are collected too; the operator's own workspaces never hold these ids.
   void (async () => {
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const registry = registryOf()
-      if (registry !== undefined) {
-        await retireLeftovers(registry, report)
-        return
-      }
-      await new Promise((resolve) => { setTimeout(resolve, 500) })
-    }
+    const registry = await waitForRegistry(registryOf)
+    if (registry !== undefined) await retireLeftovers(registry, report)
   })()
+
+  // 2. An abandoned scratch session leaves an empty task folder: `session.create`
+  //    mkdirs its cwd and nothing removes it afterwards. Empty folders of
+  //    sessions that are gone are collected once, after the settle delay.
+  void (async () => {
+    await delay(STARTUP_SETTLE_MS)
+    await retireEmptyTaskFolders(ctx, config, report)
+  })()
+}
+
+/**
+ * The configured task-folder root with `~` expanded, or undefined when the
+ * plugin has no usable path. The value arrives either as a plain string or as a
+ * live accessor, depending on how the Loader hands the entry its config.
+ * @param ctx Plugin context carrying its own resolved config.
+ * @param config Config passed alongside the context, when the Loader supplies it.
+ * @returns An absolute path, or undefined.
+ */
+function taskFolderRoot(ctx, config) {
+  const read = (slot) => {
+    if (typeof slot === 'string') return slot
+    if (slot !== null && typeof slot === 'object' && typeof slot.get === 'function') {
+      const value = slot.get()
+      return typeof value === 'string' ? value : undefined
+    }
+    return undefined
+  }
+  const raw = read(ctx.config?.defaultDir) ?? read(config?.defaultDir) ?? DEFAULT_DIR
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  const expanded = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')
+    ? join(homedir(), trimmed.slice(1))
+    : trimmed
+  return resolve(expanded)
+}
+
+/**
+ * Remove the empty task folders this plugin created for sessions that no longer
+ * exist: `<root>\<date>\<time>` in the naming this plugin mints, empty, and not
+ * the cwd of any live session. `rmdir` refuses a non-empty directory, so a task
+ * folder the agent wrote into is never touched; a date folder is only removed
+ * once its last task folder is gone. Sessions themselves are never deleted —
+ * the Host exposes no such call.
+ * @param ctx Plugin context; `sessions` is the Host store and is optional.
+ * @param config Config passed alongside the context, when the Loader supplies it.
+ * @param report Operator-facing diagnostic sink.
+ */
+async function retireEmptyTaskFolders(ctx, config, report) {
+  const root = taskFolderRoot(ctx, config)
+  if (root === undefined) return
+  let dates
+  try {
+    dates = await readdir(root, { withFileTypes: true })
+  } catch {
+    return
+  }
+  const live = new Set()
+  try {
+    for (const session of ctx.get('sessions')?.list?.() ?? []) {
+      const cwd = session?.header?.cwd
+      if (typeof cwd === 'string' && cwd !== '') live.add(resolve(cwd).toLowerCase())
+    }
+  } catch (error) {
+    report(`could not read the live session list: ${String(error)}`)
+  }
+  for (const date of dates) {
+    if (!date.isDirectory() || !DATE_FOLDER.test(date.name)) continue
+    const datePath = join(root, date.name)
+    if (live.has(datePath.toLowerCase())) continue
+    let times
+    try {
+      times = await readdir(datePath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const time of times) {
+      if (!time.isDirectory() || !TIME_FOLDER.test(time.name)) continue
+      const folder = join(datePath, time.name)
+      if (live.has(folder.toLowerCase())) continue
+      try {
+        await rmdir(folder)
+      } catch { /* a folder with content, or one already gone, is left as it is */ }
+    }
+    try {
+      await rmdir(datePath)
+    } catch { /* still holds task folders or other files */ }
+  }
+}
+
+/**
+ * Resolve the workspace registry once it is composed; this plugin can apply
+ * before the registry exists.
+ * @param lookup Registry accessor.
+ * @returns The registry, or undefined after the retries are exhausted.
+ */
+async function waitForRegistry(lookup) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const registry = lookup()
+    if (registry !== undefined) return registry
+    await delay(500)
+  }
+  return undefined
+}
+
+/**
+ * Wait before a startup sweep whose precondition is a restored session list.
+ * @param ms Delay in milliseconds.
+ */
+function delay(ms) {
+  return new Promise((done) => { setTimeout(done, ms) })
 }
 
 /**
