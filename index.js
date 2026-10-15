@@ -51,11 +51,15 @@ const MOUNT_TITLE_PREFIX = '无项目任务 · '
 const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}$/
 const TIME_FOLDER = /^\d{2}-\d{2}-\d{2}$/
 /**
- * Delay before the empty-folder sweep. The live-session list is what protects a
- * folder the operator is actually using, and that list only fills once the
- * renderer has restored its session, so the sweep must not run at attach time.
+ * Settle after the renderer's first session announcement, so the side views that
+ * resume right behind it are in the live list too before anything is removed.
  */
-const STARTUP_SETTLE_MS = 30000
+const RESTORE_SETTLE_MS = 2000
+/**
+ * Fallback arm for a Host nobody restores into (headless): without it the sweep
+ * would never run, and its leftovers are exactly what it exists to collect.
+ */
+const RESTORE_TIMEOUT_MS = 30000
 
 /** Local wall clock as `HH-MM-SS`, matching the task folder next to it. */
 function stamp() {
@@ -102,10 +106,36 @@ export function apply(ctx, config) {
     void mount(registryOf(), sessionId, cwd, report)
   }
 
+  /**
+   * Run the empty-folder sweep once, on the first session announcement.
+   *
+   * There is no "renderer connected" event (checked: no `client/*`, `connection/*`
+   * or `gateway/*` one), but the precise condition is the one the sweep itself
+   * needs: the live session store holds the sessions whose folders must survive.
+   * A restore creates its agent, which lands in the store and announces itself,
+   * so the first announcement IS the restore — the settle then covers the side
+   * views that resume right behind it. The timeout arm covers a Host that nobody
+   * restores into.
+   */
+  let folderSweepArmed = true
+  const armFolderSweep = () => {
+    if (!folderSweepArmed) return
+    folderSweepArmed = false
+    void (async () => {
+      await delay(RESTORE_SETTLE_MS)
+      await retireEmptyTaskFolders(ctx, config, report)
+    })()
+  }
+  void (async () => {
+    await delay(RESTORE_TIMEOUT_MS)
+    armFolderSweep()
+  })()
+
   // A session of ours was announced: mount it while it is still blank, which is
   // both the freshly created case and a blank scratch session restored at
   // startup. A session that already carries history needs no mount.
   ctx.on('api-session/added', (summary) => {
+    armFolderSweep()
     if (summary === undefined || typeof summary.sessionId !== 'string') return
     if (!summary.sessionId.startsWith(SESSION_PREFIX)) return
     if (summary.blank !== true) return
@@ -131,12 +161,8 @@ export function apply(ctx, config) {
   })()
 
   // 2. An abandoned scratch session leaves an empty task folder: `session.create`
-  //    mkdirs its cwd and nothing removes it afterwards. Empty folders of
-  //    sessions that are gone are collected once, after the settle delay.
-  void (async () => {
-    await delay(STARTUP_SETTLE_MS)
-    await retireEmptyTaskFolders(ctx, config, report)
-  })()
+  //    mkdirs its cwd and nothing removes it afterwards. `armFolderSweep` above
+  //    collects those, gated on the restore rather than on a fixed delay.
 }
 
 /**
