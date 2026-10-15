@@ -123,12 +123,22 @@ export function apply(ctx, config) {
     folderSweepArmed = false
     void (async () => {
       await delay(RESTORE_SETTLE_MS)
-      await retireEmptyTaskFolders(ctx, config, report)
+      // Maintenance must never be able to take the Host down: an unhandled
+      // rejection here exits the desktop process, so every failure stays local.
+      try {
+        await retireEmptyTaskFolders(ctx, config, report)
+      } catch (error) {
+        report(`empty task folder sweep skipped: ${String(error)}`)
+      }
     })()
   }
   void (async () => {
     await delay(RESTORE_TIMEOUT_MS)
-    armFolderSweep()
+    try {
+      armFolderSweep()
+    } catch (error) {
+      report(`empty task folder sweep could not be armed: ${String(error)}`)
+    }
   })()
 
   // A session of ours was announced: mount it while it is still blank, which is
@@ -156,8 +166,12 @@ export function apply(ctx, config) {
   //    Keyed on membership rather than the title, so mounts from older prefixes
   //    are collected too; the operator's own workspaces never hold these ids.
   void (async () => {
-    const registry = await waitForRegistry(registryOf)
-    if (registry !== undefined) await retireLeftovers(registry, report)
+    try {
+      const registry = await waitForRegistry(registryOf)
+      if (registry !== undefined) await retireLeftovers(registry, report)
+    } catch (error) {
+      report(`leftover mount sweep skipped: ${String(error)}`)
+    }
   })()
 
   // 2. An abandoned scratch session leaves an empty task folder: `session.create`
@@ -167,22 +181,15 @@ export function apply(ctx, config) {
 
 /**
  * The configured task-folder root with `~` expanded, or undefined when the
- * plugin has no usable path. The value arrives either as a plain string or as a
- * live accessor, depending on how the Loader hands the entry its config.
- * @param ctx Plugin context carrying its own resolved config.
- * @param config Config passed alongside the context, when the Loader supplies it.
+ * plugin has no usable path. The value comes from the plugin's own config, which
+ * the Loader passes as `apply`'s second argument — it must NOT be read as
+ * `ctx.config`, which throws unless the `config` service is injected (that is
+ * what once took the desktop host down).
+ * @param config Resolved plugin config.
  * @returns An absolute path, or undefined.
  */
-function taskFolderRoot(ctx, config) {
-  const read = (slot) => {
-    if (typeof slot === 'string') return slot
-    if (slot !== null && typeof slot === 'object' && typeof slot.get === 'function') {
-      const value = slot.get()
-      return typeof value === 'string' ? value : undefined
-    }
-    return undefined
-  }
-  const raw = read(ctx.config?.defaultDir) ?? read(config?.defaultDir) ?? DEFAULT_DIR
+function taskFolderRoot(config) {
+  const raw = typeof config?.defaultDir === 'string' ? config.defaultDir : DEFAULT_DIR
   const trimmed = raw.trim()
   if (trimmed === '') return undefined
   const expanded = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')
@@ -199,11 +206,11 @@ function taskFolderRoot(ctx, config) {
  * once its last task folder is gone. Sessions themselves are never deleted —
  * the Host exposes no such call.
  * @param ctx Plugin context; `sessions` is the Host store and is optional.
- * @param config Config passed alongside the context, when the Loader supplies it.
+ * @param config Resolved plugin config.
  * @param report Operator-facing diagnostic sink.
  */
 async function retireEmptyTaskFolders(ctx, config, report) {
-  const root = taskFolderRoot(ctx, config)
+  const root = taskFolderRoot(config)
   if (root === undefined) return
   let dates
   try {
