@@ -1,40 +1,76 @@
 # dsh-plugin-noworkspace-session
 
-在 DSH 里创建**未分组（无工作区）会话**，并且用的是 DSH 原生的输入区——不接管、不自绘。
+为 DeepSeek Harness 增加**未分组（无工作区）会话**：点一下就开一个不占用任何项目工作区的会话，输入区仍是 DSH 原生那一个——模型选择、权限、附件、斜杠命令全部照旧。
 
-## 功能
+## 为什么需要它
 
-1. **入口**：hero 行右侧一枚 chip「不在工作区中工作」（几何照抄原生 chip），右侧栏「开始」页另有一张卡片「非工作区会话」（`sidebar.right.tab.guide.entry` 座位）。两处动作相同：创建一个未分组会话，工作目录为 `<默认位置>\<YYYY-MM-DD>\<HH-MM-SS>`，由 Host 递归创建。
-2. **原生输入区**：未分组空白会话在原生的判定里是 `inert`（输入区禁用）。宿主半把该会话临时挂到"它自己 cwd 对应的工作区"上，使原生输入区可用——模型、权限、附件、斜杠命令全部原生。首条消息一落地，这个临时工作区即被删除，会话落回**未分组**。
-3. **不留残留**：点击后不打字就切走，分组立即消失；崩溃/升级留下的旧挂载由宿主半在启动时回收，**空的任务目录**（`<默认位置>\<日期>\<时间>` 中已无内容、且不属于任何在用会话的）也会在启动后一次性清理——里面有文件的目录永远不动。
-4. **设置行**：「设置 → 通用设置 → 无项目任务文件夹」，显示当前路径、更改（宿主原生目录选择框）、重置；值持久化到 profile 的 `cordis.patch.yml`。
+DSH 的输入区要求会话属于某个工作区；未分组会话在原生判定里是"空白会话"，输入区会被禁用。本插件在创建会话后，**临时**把它挂到与它自己工作目录同名的工作区上，让原生输入区可用；你发出第一条消息后，这个临时工作区被删除，会话落回**未分组**并照常保留、可恢复。
 
-## 实现要点
+## 两个入口
 
-| 半区 | 文件 | 职责 |
-|---|---|---|
-| Host | `index.js` | `api-session/added` → 挂载临时工作区；`api-session/activity` → 首条消息后脱离；启动回收遗留挂载 |
-| Client | `client.js` | chip（dock 座位；将来 DSH 有 `conversation.hero.options` 时自动迁移到 hero 行内）、等挂载完成后开会话、只删本页自建挂载的清理、设置行 |
+| 位置 | 说明 |
+|---|---|
+| hero 行右侧 | 一枚「不在工作区中工作」按钮，与原生工作区选择框同一行；原生选择框保持原生，未被替换 |
+| 右侧栏「开始」页 | 一张「非工作区会话」卡片，与「工作区文件 / 新建终端 / 浏览器」并列 |
 
-原生的 `conversation.hero.workspace` 选择框**不被遮蔽**，保持 DSH 原生实现。
+两处动作一致：新建会话 → 临时挂载 → 原生输入区可用 → 首条消息后回到未分组。
+
+## 工作目录
+
+每次新建会话都会在工作目录下创建 `<YYYY-MM-DD>\<HH-MM-SS>` 子目录并作为该会话的 cwd，因此每个未分组任务互不干扰。
+
+默认位置：`~/Documents/dsh`（可在设置里改）。
+
+- **不留残留**：点了按钮却没发消息就切走，临时分组立刻消失；磁盘上那个空目录会在**下次启动 DSH 时**被回收。目录里只要有文件（代理写过东西）就永远不会被删。
+- 会话本身从不被删除。
+
+## 设置
+
+**设置 → 通用设置 → 无项目任务文件夹**：显示当前路径，支持「更改」（宿主原生目录选择框）与「重置」（回落默认 `~/Documents/dsh`）。修改写入当前 profile 的配置并立即生效，之后新建的会话立即使用新位置。
 
 ## 安装
 
-通过 `plugin_manager` 的 `install_bundle` 安装本目录 → **重启 DSH 桌面版**（宿主半代码只在重启后加载）→ 页面 **Ctrl+Shift+R**（bundle URL 带 `?rev=` 指纹，但引导 HTML 可能命中缓存）。
+在应用内用插件管理器安装，或在命令行：
 
-## 已知边界
+```bash
+# npm
+dsh plugin --profile desktop add dsh-plugin-noworkspace-session
 
-- 首条消息直接在原生输入区输入，附件走原生链路。
-- 放弃的 scratch 会话（切走且未发消息）回到未分组；空白会话在侧栏本来就隐藏（DSH 原生规则），会话日志与文件夹都保留。
-- 「跟随会话标题」未实现：标题在首条消息之后才生成，而那时临时分组已按设计脱离；磁盘文件夹不可改名（cwd 不可变）。
+# GitHub
+dsh plugin --profile desktop add github:<owner>/dsh-plugin-noworkspace-session
 
-## 文件
+# 本地 tarball
+dsh plugin --profile desktop add /absolute/path/to/dsh-plugin-noworkspace-session-0.2.0.tgz
+```
 
-| 文件 | 职责 |
-|---|---|
-| `index.js` | Host 半 |
-| `client.js` | 浏览器半 |
-| `cordis.patch.yml` | Loader patch：insert `noworkspace-session` row |
-| `交接文档.md` | 面向接手者的现状与坑（含源码依据） |
-| `项目日志.md` | 开发过程与决策记录 |
-| `tests/apply-smoke.mjs` | 回归冒烟：用模仿 cordis 服务守卫的 mock ctx 调 `apply()`，验证清扫行为与"无未捕获拒绝"（`node tests/apply-smoke.mjs`） |
+安装后**重启 DSH**（宿主半代码只在进程启动时加载），随后**硬刷新页面**（Ctrl+Shift+R）以确保取到新的客户端 bundle。
+
+## 卸载
+
+```bash
+dsh plugin --profile desktop remove dsh-plugin-noworkspace-session
+```
+
+然后在应用内用插件管理器移除 bundle 并刷新页面。已创建的未分组会话不会被删除。
+
+## 已知限制
+
+- **右侧栏不能承载会话**：DSH 的右侧栏整套注册都绑定「当前会话」，标签页是文件 / 浏览器 / 终端这类面板类型，没有渲染对话面的座位。所以卡片点击后是在**主视图**打开会话，而不是在右栏开一个会话标签页。
+- 放弃的空白会话回到未分组后遵循 DSH 原生规则：空白会话在侧栏不可见（有了消息才会作为普通会话显示）。
+- 首条消息直接输入即可；附件走原生链路。
+
+## 兼容性
+
+- 目标：DSH 0.2.0 及以上的桌面版与 Web 版。
+- 依赖：`@deepseek-ai/schemastery`（DSH 自带，随插件声明）。
+- 只在 `conversation.input.dock`、`conversation.hero.options`、`settings.general.item`、`sidebar.right.tab.guide.entry` 这类**增量座位**上注册，不替换任何 DSH 原生控件。
+
+## License
+
+MIT
+
+---
+
+## English
+
+Adds **sessions without a workspace** to DeepSeek Harness: one click opens a session that occupies no project workspace while keeping DSH's own composer (model, permissions, attachments, slash commands). The session is temporarily attached to a workspace named after its own directory so the native composer unlocks; after your first message that temporary workspace is removed and the session lands under **Ungrouped**, resumable as usual. Entry points: a button on the hero row and a card on the right sidebar's start page. Each session gets its own `<date>\<time>` working directory; empty ones are reclaimed on the next DSH start, and a directory holding files is never touched. Install with `dsh plugin --profile desktop add dsh-plugin-noworkspace-session`, then restart DSH and hard-refresh the page. MIT.
