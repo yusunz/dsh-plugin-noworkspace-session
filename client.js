@@ -277,13 +277,12 @@ window.__ModuleLoader__.load({
         const time = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
         const cwd = `${base}${sep}${date}${sep}${time}`
         const sessionId = `${SESSION_PREFIX}${uid()}`
+        // Tracked BEFORE the create call, and keyed on the id this half minted:
+        // the Host mounts the session *during* that call, so a sweep triggered by
+        // the resulting workspace change must already recognize the mount as ours.
+        tracked.set(sessionId, Date.now())
+        adopting.set(sessionId, Date.now() + ADOPTION_WINDOW_MS)
         const created = await ctx.sessions.create({ cwd, sessionId })
-        // Protected from the very next moment until it turns current: the Host
-        // mounts it while this half is still inside the wait below, and the
-        // sweep reacts to that same workspace-list change. Registering after the
-        // wait would be too late, and a plain time window would delay the
-        // retirement of a mount the operator has already left.
-        adopting.set(created, Date.now() + ADOPTION_WINDOW_MS)
         await waitForWorkspaceMount(created, cwd)
         ctx.uiWorkspace.openSession(created)
         return created
@@ -332,10 +331,17 @@ window.__ModuleLoader__.load({
        * held for `MOUNT_MIN_AGE_MS` in case adoption is merely slow.
        */
       /**
-       * Sessions created on this page that `openSession` has not adopted yet:
-       * the only window where a mount must survive while it is neither current
-       * nor watched. Cleared the moment the session turns current, with a time
-       * fallback in case that never happens.
+       * Scratch sessions this page created, keyed by the id it minted. A mount is
+       * only ever retired when it belongs to one of these: anything else (a mount
+       * from another page load, a previous process, or a build that registered
+       * after the Host had already mounted) is left for the Host's startup sweep
+       * rather than deleted on a guess.
+       */
+      const tracked = new Map()
+      /**
+       * Tracked sessions `openSession` has not adopted yet: the only window where
+       * a mount must survive while it is neither current nor watched. Cleared the
+       * moment the session turns current, with a time fallback.
        */
       const adopting = new Map()
       /** Scratch sessions that have been the current Session at least once. */
@@ -359,18 +365,16 @@ window.__ModuleLoader__.load({
         for (const [id, deadline] of adopting) if (deadline <= now) adopting.delete(id)
         for (const workspace of ctx.workspaces.list.getSnapshot().items) {
           if (typeof workspace.title !== 'string' || !workspace.title.startsWith(MOUNT_TITLE_PREFIX)) continue
+          const owned = workspace.sessionIds.find((id) => tracked.has(id))
+          if (owned === undefined) continue
           // Still inside the creation → openSession window.
-          if (workspace.sessionIds.some((id) => adopting.has(id))) continue
-          const members = workspace.sessionIds.map((id) => sessions.byId[id])
-          if (members.some((member) => member === undefined)) continue
-          if (members.some((member) => member.id.startsWith(SESSION_PREFIX) === false)) continue
-          const blank = members.every((member) => member.blank === true)
+          if (adopting.has(owned)) continue
           // The page the operator is looking at right now.
-          if (blank && workspace.sessionIds.includes(current)) continue
+          if (workspace.sessionIds.includes(current)) continue
           // Never adopted and its session is still young: hold it, in case
           // adoption is slow or the page was reloaded mid-adoption.
-          if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) continue
-          console.info('[noworkspace] retiring mount', workspace.title, { blank, adopted: members.map((member) => adopted.has(member.id)) })
+          if (!adopted.has(owned) && ageOf(sessions.byId[owned]) < MOUNT_MIN_AGE_MS) continue
+          console.info('[noworkspace] retiring mount', workspace.title, { owned, adopted: adopted.has(owned) })
           void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
         }
       }
