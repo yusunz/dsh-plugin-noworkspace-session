@@ -80,18 +80,20 @@ export function apply(ctx) {
     )
   })
 
-  /** Service supplied by the declaration below; the dynamic lookup is only a fallback. */
-  let injected
-  ctx.inject(['workspaceRegistry'], (child) => {
-    injected = child.workspaceRegistry
-    dbg({ stage: 'inject-registry', type: typeof injected })
-  })
+  /**
+   * The registry resolved from the root context, lazily at call time.
+   *
+   * Deliberately NOT taken from `ctx.inject(['workspaceRegistry'], …)`: on the
+   * desktop build the injected instance accepts the call but never settles
+   * `resolveByPath`, which left every mount pending and the composer inert. The
+   * root lookup returns the live service and has been reliable (verified against
+   * a hot-reloaded instance of this same module).
+   */
   const registryOf = () => {
-    if (injected !== undefined) return injected
     try {
-      const fallback = ctx.root?.get?.('workspaceRegistry') ?? ctx.get('workspaceRegistry')
-      dbg({ stage: 'registry-fallback', type: typeof fallback })
-      return fallback
+      const registry = ctx.root?.get?.('workspaceRegistry') ?? ctx.get('workspaceRegistry')
+      if (registry === undefined) dbg({ stage: 'registry-missing' })
+      return registry
     } catch (error) {
       dbg({ stage: 'registry-throw', message: String(error?.message ?? error) })
       return undefined
