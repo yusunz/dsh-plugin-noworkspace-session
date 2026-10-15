@@ -50,6 +50,8 @@ window.__ModuleLoader__.load({
     /** Safety-net re-check; subscriptions already retire a group the moment the operator moves away. */
     const MOUNT_SWEEP_INTERVAL_MS = 3000
     const DEFAULT_DIR = '~/Documents/dsh'
+    /** Tab-type identity in the right sidebar registry; also the guide card's slot key. */
+    const SIDEBAR_TYPE_ID = 'dsh-plugin-noworkspace-session'
 
     const zh = {
       'chip.label': '不在工作区中工作',
@@ -64,6 +66,8 @@ window.__ModuleLoader__.load({
       'settings.error': '保存失败：{message}',
       'settings.writeFailed': '宿主拒绝了这次写入',
       'settings.unavailable': '该设置项在宿主中不可写（配置命名空间未暴露）',
+      'card.title': '非工作区会话',
+      'card.description': '在无项目任务的临时目录中新建会话，并在主视图打开',
     }
 
     const en = {
@@ -79,6 +83,8 @@ window.__ModuleLoader__.load({
       'settings.error': 'Save failed: {message}',
       'settings.writeFailed': 'The host rejected this write',
       'settings.unavailable': 'This setting is not writable on the host (config namespace not exposed)',
+      'card.title': 'Session without a workspace',
+      'card.description': 'Start a session in the no-project task folder and open it in the main view',
     }
 
     /* Chip geometry mirrors the agent-preset seat in the hero row
@@ -110,6 +116,15 @@ window.__ModuleLoader__.load({
 .nws-rowDesc{margin-top:4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .nws-rowError{margin-top:6px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .nws-rowControls{display:flex;align-items:center;gap:8px;flex:none}
+.nws-card{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:none;border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;text-align:left;cursor:pointer}
+.nws-card:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover)}
+.nws-card:disabled{cursor:default;opacity:.65}
+.nws-card:focus-visible{outline:1px solid var(--dsw-alias-brand-primary);outline-offset:-1px}
+.nws-cardIcon{flex:none;display:inline-flex;color:var(--dsw-alias-label-secondary)}
+.nws-cardText{display:flex;flex-direction:column;gap:2px;min-width:0}
+.nws-cardTitle{font-size:13px;line-height:18px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nws-cardDesc{font-size:12px;line-height:16px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nws-cardError{font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nws-path{color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:right}
 .nws-btn{padding:5px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}
 .nws-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
@@ -202,6 +217,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Glyph for the guide capsule; the registry wants a component, not an element.
+     * @param props - `size` in pixels, as the guide's icon contract passes it.
+     * @returns the element to draw.
+     */
+    function GuideIcon({ size }) {
+      return icoNoWorkspace(typeof size === 'number' ? size : 22)
+    }
+
+    /**
      * Seat that exists in every build: the composer stack's full-width dock,
      * which sits between the hero row and the input card. It renders for every
      * Session, so it shows the entry only where the shipped composer would be
@@ -217,6 +241,37 @@ window.__ModuleLoader__.load({
       if (seatTaken() || summary === undefined || summary.blank !== true || own) return null
       return h('div', { className: 'nws-dock' },
         h('div', { className: 'nws-dockInner' }, h(UngroupedChip, { start, t })))
+    }
+
+    /**
+     * Card in the right sidebar's guide ("开始") page.
+     *
+     * The guide entry is a tab *type* seat: a registered type contributes its
+     * entry capsule and the shipped card would open a pane of that type. This
+     * plugin has no pane, so it registers the seat's own card and spends the
+     * click on the same action as the chip — create the session and open it in
+     * the main view. `title`/`description` come from the guide entry the tab
+     * registry carries, so the copy stays localized in one place.
+     */
+    function GuideCard({ title, description, start, t }) {
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(null)
+      const onClick = async () => {
+        if (busy) return
+        setBusy(true)
+        setError(null)
+        try { await start() } catch (e) { setError(msg(e)) } finally { setBusy(false) }
+      }
+      return h('button', {
+        type: 'button', className: 'nws-card', disabled: busy, title,
+        'data-sidebar-right-guide-entry': 'noworkspace',
+        onClick: () => { void onClick() },
+      },
+        h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(22)),
+        h('span', { className: 'nws-cardText' },
+          h('span', { className: 'nws-cardTitle' }, busy ? t('chip.busy') : title),
+          h('span', { className: error === null ? 'nws-cardDesc' : 'nws-cardError', role: error === null ? undefined : 'alert' },
+            error === null ? (description ?? t('card.description')) : t('chip.error', { message: error }))))
     }
 
     // ---- 2. settings row ----------------------------------------------
@@ -488,6 +543,31 @@ window.__ModuleLoader__.load({
             inject: () => ({ hooks: { dirForm: form }, change, reset, homeOf: hostHome }),
           }, DefaultDirRow))
         }), 'noworkspace-session: settings row')
+      })
+
+      // 3) right sidebar guide card — the tab *type* carries the capsule the
+      //    guide page renders, and the seat's own card spends the click on
+      //    `start()`. The type is registered without a pane body on purpose: a
+      //    session belongs to the conversation surface, which the right column
+      //    has no seat for, so opening a pane of this kind is not a path.
+      ctx.inject(['sidebarRightTabs'], (child) => {
+        child.effect(() => child.sidebarRightTabs.register({
+          id: SIDEBAR_TYPE_ID,
+          kind: 'noworkspace',
+          multiple: false,
+          title: () => t('card.title'),
+          guide: [{
+            id: 'new',
+            order: 30,
+            title: () => t('card.title'),
+            description: () => t('card.description'),
+            icon: GuideIcon,
+          }],
+        }), 'noworkspace-session: sidebar tab type')
+        child.effect(() => child.slots.inject('sidebar.right.tab.guide.entry', () => child.slots.register({
+          name: 'sidebar.right.tab.guide.entry', key: SIDEBAR_TYPE_ID, locale: NS,
+          inject: () => ({ start }),
+        }, GuideCard)), 'noworkspace-session: sidebar guide card')
       })
     }
 
