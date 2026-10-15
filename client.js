@@ -34,9 +34,11 @@ window.__ModuleLoader__.load({
     /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
     const MOUNT_TITLE_PREFIX = '无项目任务 · '
     /** How long a just-created mount is protected while `openSession` catches up. */
-    const SWEEP_GRACE_MS = 15000
+    const ADOPTION_WINDOW_MS = 15000
     /** A mount never seen as the current Session is held this long before it counts as abandoned. */
     const MOUNT_MIN_AGE_MS = 60000
+    /** Safety-net re-check; subscriptions already retire a group the moment the operator moves away. */
+    const MOUNT_SWEEP_INTERVAL_MS = 3000
     const DEFAULT_DIR = '~/Documents/dsh'
 
     const zh = {
@@ -279,8 +281,7 @@ window.__ModuleLoader__.load({
         // Protect it from the very next moment: the Host mounts it while this
         // half is still inside the wait below, and the sweep reacts to that same
         // workspace-list change. Registering after the wait would be too late.
-        recentSessions.set(created, Date.now() + SWEEP_GRACE_MS)
-        scheduleSweep(SWEEP_GRACE_MS + 100)
+        recentSessions.set(created, Date.now() + ADOPTION_WINDOW_MS)
         await waitForWorkspaceMount(created, cwd)
         return created
       }
@@ -324,15 +325,10 @@ window.__ModuleLoader__.load({
        * retires the group on the spot. A mount that never becomes current is
        * held for `MOUNT_MIN_AGE_MS` in case adoption is merely slow.
        */
-      let pendingSweep = null
       /** Sessions this half just created: their mount is still being adopted. */
       const recentSessions = new Map()
       /** Scratch sessions that have been the current Session at least once. */
       const adopted = new Set()
-      const scheduleSweep = (delayMs) => {
-        if (pendingSweep !== null) return
-        pendingSweep = setTimeout(() => { pendingSweep = null; sweep() }, delayMs)
-      }
       /** Milliseconds since one Session row's last durable activity. */
       const ageOf = (summary) => (typeof summary?.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0)
       const sweep = () => {
@@ -357,30 +353,23 @@ window.__ModuleLoader__.load({
           // The page the operator is looking at right now.
           if (blank && workspace.sessionIds.includes(current)) continue
           // Still inside the creation → openSession window.
-          if (workspace.sessionIds.some((id) => recentSessions.has(id))) {
-            scheduleSweep(SWEEP_GRACE_MS)
-            continue
-          }
+          if (workspace.sessionIds.some((id) => recentSessions.has(id))) continue
           // Never adopted and still young: hold it, in case adoption is slow.
-          if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) {
-            scheduleSweep(MOUNT_MIN_AGE_MS)
-            continue
-          }
-          void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next change */ })
+          if (blank && members.some((member) => !adopted.has(member.id) && ageOf(member) < MOUNT_MIN_AGE_MS)) continue
+          void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
         }
       }
 
       ctx.effect(() => {
         const stop = ctx.sessions.list.subscribe(sweep)
         const stopWorkspaces = ctx.workspaces.list.subscribe(sweep)
-        // A page load can start with everything already in place and no further
-        // change, so sweep once on install too (a no-op before a current Session exists).
+        // The subscriptions fire on every session/workspace change, which is what
+        // makes moving away retire the group on the spot; the timer only exists so
+        // a missed change still converges within a few seconds, and so a mount held
+        // by the age guard above is retired once it grows old enough.
+        const timer = setInterval(sweep, MOUNT_SWEEP_INTERVAL_MS)
         sweep()
-        return () => {
-          stop()
-          stopWorkspaces()
-          if (pendingSweep !== null) { clearTimeout(pendingSweep); pendingSweep = null }
-        }
+        return () => { stop(); stopWorkspaces(); clearInterval(timer) }
       }, 'noworkspace-session: abandoned-mount sweep')
 
       // 1) the entry itself, in whichever additive seat this harness declares.
