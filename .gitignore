@@ -1,3 +1,8 @@
 node_modules/
 .experiment/
 *.log
+
+# 开发过程文档：含本机路径与需求方信息，仅本地保留，不进版本库与发布物
+交接文档.md
+项目日志.md
+INSTALL.md
