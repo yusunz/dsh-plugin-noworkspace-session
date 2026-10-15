@@ -20,7 +20,6 @@
  * injected instance accepted the call but never settled `resolveByPath`, so every
  * mount stayed pending and the composer stayed inert.
  */
-import { appendFileSync, mkdirSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 
 /** Default task folder before an operator overrides it in Settings. `~` is expanded in the browser. */
@@ -39,22 +38,17 @@ export const Config = z.object({
 const SESSION_PREFIX = 'session-nws-'
 /** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
-/** Diagnostic sink; remove together with the dbg calls once this behaviour is settled. */
-const DEBUG_LOG = `${process.env.TEMP ?? 'C:\\Windows\\Temp'}\\nws-probe\\host.log`
-
-/** Append one diagnostic line; diagnostics never affect behaviour. */
-function dbg(entry) {
-  try {
-    mkdirSync(DEBUG_LOG.replace(/[\\/][^\\/]+$/, ''), { recursive: true })
-    appendFileSync(DEBUG_LOG, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...entry })}\n`, 'utf8')
-  } catch { /* diagnostics are best-effort */ }
-}
 
 /** Local wall clock as `HH-MM-SS`, matching the task folder next to it. */
 function stamp() {
   const now = new Date()
   const pad = (value) => String(value).padStart(2, '0')
   return `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
+}
+
+/** Operator-facing diagnostic; the logger is optional in reduced compositions. */
+function warn(ctx, message) {
+  try { ctx.logger?.warn?.('noworkspace-session: %s', message) } catch { /* logging is best-effort */ }
 }
 
 /**
@@ -73,39 +67,26 @@ export function apply(ctx) {
   /** The live workspace registry, resolved lazily from the root context. */
   const registryOf = () => {
     try {
-      const registry = ctx.root?.get?.('workspaceRegistry') ?? ctx.get('workspaceRegistry')
-      if (registry === undefined) dbg({ stage: 'registry-missing' })
-      return registry
+      return ctx.root?.get?.('workspaceRegistry') ?? ctx.get('workspaceRegistry')
     } catch (error) {
-      dbg({ stage: 'registry-throw', message: String(error?.message ?? error) })
+      warn(ctx, `could not resolve the workspace registry: ${String(error)}`)
       return undefined
     }
   }
-
-  /** Operator-facing warning: the session logger, mirrored into the diagnostic sink. */
-  const warn = (message) => {
-    try { ctx.logger?.warn?.('noworkspace-session: %s', message) } catch { /* logger is optional */ }
-    dbg({ stage: 'warn', message })
-  }
+  const report = (message) => { warn(ctx, message) }
 
   /** Sessions already handled, so a retirement is never undone by a later announcement. */
   const handled = new Set()
   const consider = (sessionId, cwd) => {
     if (handled.has(sessionId)) return
     handled.add(sessionId)
-    dbg({ stage: 'consider', sessionId, cwd })
-    void mount(registryOf(), sessionId, cwd, warn)
+    void mount(registryOf(), sessionId, cwd, report)
   }
 
   // A session of ours was announced: mount it while it is still blank, which is
   // both the freshly created case and a blank scratch session restored at
   // startup. A session that already carries history needs no mount.
   ctx.on('api-session/added', (summary) => {
-    dbg({
-      stage: 'event-added',
-      id: summary?.sessionId, blank: summary?.blank, cwd: summary?.cwd,
-      updatedAt: summary?.updatedAt,
-    })
     if (summary === undefined || typeof summary.sessionId !== 'string') return
     if (!summary.sessionId.startsWith(SESSION_PREFIX)) return
     if (summary.blank !== true) return
@@ -115,30 +96,24 @@ export function apply(ctx) {
   // The first user-authored durable message: the mount has done its job and
   // Ungrouped is the session's real home.
   ctx.on('api-session/activity', (sessionId) => {
-    dbg({ stage: 'event-activity', sessionId })
     if (typeof sessionId !== 'string') return
-    void unmount(registryOf(), sessionId)
+    void unmount(registryOf(), sessionId, report)
   })
 
   // A previous process can leave mounts behind (crash, upgrade, or an earlier
   // build): retire every workspace whose members are all sessions of ours. Keyed
   // on membership rather than on the title, so mounts from older prefixes are
   // collected too. The operator's own workspaces never hold this plugin's ids.
+  // The registry may not be composed yet while this plugin applies, so retry.
   void (async () => {
-    const registry = registryOf()
-    if (registry === undefined) return
-    for (const workspace of registry.list()) {
-      const members = [...workspace.sessionIds]
-      if (members.length === 0) continue
-      if (!members.every((id) => id.startsWith(SESSION_PREFIX))) continue
-      try {
-        await registry.delete(workspace.id)
-        dbg({ stage: 'startup-sweep', ok: true, title: workspace.title, members })
-      } catch (error) {
-        dbg({ stage: 'startup-sweep', ok: false, title: workspace.title, message: String(error?.message ?? error) })
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const registry = registryOf()
+      if (registry !== undefined) {
+        await retireLeftovers(registry, report)
+        return
       }
+      await new Promise((resolve) => { setTimeout(resolve, 500) })
     }
-    dbg({ stage: 'ready' })
   })()
 }
 
@@ -148,31 +123,26 @@ export function apply(ctx) {
  * @param registry Host workspace registry, when the profile composes one.
  * @param sessionId Session to mount.
  * @param cwd The session's project directory (the task folder).
- * @param warn Operator-facing warning sink.
+ * @param report Operator-facing diagnostic sink.
  */
-async function mount(registry, sessionId, cwd, warn) {
-  if (registry === undefined) { dbg({ stage: 'mount-no-registry', sessionId }); return }
+async function mount(registry, sessionId, cwd, report) {
+  if (registry === undefined) {
+    report(`session ${sessionId} could not be mounted: the profile composes no workspace registry`)
+    return
+  }
   try {
-    if (registry.list().some(workspace => workspace.sessionIds.includes(sessionId))) {
-      dbg({ stage: 'mount-skip', reason: 'already accounted', sessionId })
-      return
-    }
+    if (registry.list().some(workspace => workspace.sessionIds.includes(sessionId))) return
     if (typeof cwd !== 'string' || cwd === '') {
-      dbg({ stage: 'mount-skip', reason: 'no cwd', sessionId })
+      report(`session ${sessionId} carries no cwd to mount`)
       return
     }
     const existing = await registry.resolveByPath(cwd)
     const workspace = existing ?? await registry.create(cwd, `${MOUNT_TITLE_PREFIX}${stamp()}`)
     await workspace.attachSession(sessionId)
-    dbg({
-      stage: 'mount', ok: true, sessionId, cwd,
-      reused: existing !== undefined, workspaceId: workspace.id, title: workspace.title,
-    })
   } catch (error) {
     // Everything still works without the mount: the hero keeps its native
     // "choose a workspace" state, so this is a warning rather than a failure.
-    warn(`could not mount session ${sessionId} at ${String(cwd)}: ${String(error)}`)
-    dbg({ stage: 'mount', ok: false, sessionId, cwd, message: String(error?.message ?? error), stack: String(error?.stack ?? '').slice(0, 900) })
+    report(`could not mount session ${sessionId} at ${String(cwd)}: ${String(error)}`)
   }
 }
 
@@ -180,17 +150,35 @@ async function mount(registry, sessionId, cwd, warn) {
  * Drop the temporary workspace that mount() created for this session.
  * @param registry Host workspace registry, when the profile composes one.
  * @param sessionId Session whose mount to retire.
+ * @param report Operator-facing diagnostic sink.
  */
-async function unmount(registry, sessionId) {
+async function unmount(registry, sessionId, report) {
   if (registry === undefined) return
   try {
     const owned = registry.list().find(workspace =>
       typeof workspace.title === 'string' && workspace.title.startsWith(MOUNT_TITLE_PREFIX)
       && workspace.sessionIds.includes(sessionId))
-    if (owned === undefined) { dbg({ stage: 'unmount-skip', sessionId }); return }
+    if (owned === undefined) return
     await registry.delete(owned.id)
-    dbg({ stage: 'unmount', ok: true, sessionId, workspaceId: owned.id, title: owned.title })
   } catch (error) {
-    dbg({ stage: 'unmount', ok: false, sessionId, message: String(error?.message ?? error) })
+    report(`could not retire the mount for session ${sessionId}: ${String(error)}`)
+  }
+}
+
+/**
+ * Retire every workspace left behind by an earlier process.
+ * @param registry Host workspace registry, when the profile composes one.
+ * @param report Operator-facing diagnostic sink.
+ */
+async function retireLeftovers(registry, report) {
+  for (const workspace of registry.list()) {
+    const members = [...workspace.sessionIds]
+    if (members.length === 0) continue
+    if (!members.every((id) => id.startsWith(SESSION_PREFIX))) continue
+    try {
+      await registry.delete(workspace.id)
+    } catch (error) {
+      report(`could not retire leftover workspace "${String(workspace.title)}": ${String(error)}`)
+    }
   }
 }

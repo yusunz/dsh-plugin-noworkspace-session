@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useState, useEffect } = React
+    const { useState } = React
 
     const NS = 'noworkspace'
     /** Loader row id in cordis.patch.yml; also the config-form namespace. */
@@ -374,7 +374,6 @@ window.__ModuleLoader__.load({
           // Never adopted and its session is still young: hold it, in case
           // adoption is slow or the page was reloaded mid-adoption.
           if (!adopted.has(owned) && ageOf(sessions.byId[owned]) < MOUNT_MIN_AGE_MS) continue
-          console.info('[noworkspace] retiring mount', workspace.title, { owned, adopted: adopted.has(owned) })
           void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
         }
       }
