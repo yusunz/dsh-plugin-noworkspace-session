@@ -116,15 +116,20 @@ window.__ModuleLoader__.load({
 .nws-rowDesc{margin-top:4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .nws-rowError{margin-top:6px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .nws-rowControls{display:flex;align-items:center;gap:8px;flex:none}
-.nws-card{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:none;border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;text-align:left;cursor:pointer}
-.nws-card:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover)}
+/* The guide capsule below copies the shipped card's own sheet
+   (ui-sidebar-right GuideBody.module.css .entry): same 380px cell, 56px
+   minimum, 14/20 padding, 0.5px border on the l3 border token, radius-xl and
+   the layer-1 fill. A custom card replaces the shipped one wholesale, so these
+   specs have to travel with it to stay indistinguishable in the column. */
+.nws-card{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl,10px);cursor:pointer}
+.nws-card:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .nws-card:disabled{cursor:default;opacity:.65}
 .nws-card:focus-visible{outline:1px solid var(--dsw-alias-brand-primary);outline-offset:-1px}
-.nws-cardIcon{flex:none;display:inline-flex;color:var(--dsw-alias-label-secondary)}
-.nws-cardText{display:flex;flex-direction:column;gap:2px;min-width:0}
-.nws-cardTitle{font-size:13px;line-height:18px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nws-cardDesc{font-size:12px;line-height:16px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nws-cardError{font-size:12px;line-height:16px;color:var(--dsw-alias-state-error-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nws-cardIcon{display:flex;flex:none;align-items:center;justify-content:center;width:26px;height:26px;color:var(--dsw-alias-label-secondary)}
+.nws-cardText{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
+.nws-cardTitle{overflow:hidden;font-size:14px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
+.nws-cardDesc{overflow:hidden;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
+.nws-cardError{overflow:hidden;color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
 .nws-path{color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:right}
 .nws-btn{padding:5px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}
 .nws-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
@@ -176,15 +181,15 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    const svg = (children) => h('svg', {
-      viewBox: '0 0 16 16', width: 16, height: 16, fill: 'none', stroke: 'currentColor',
+    const svg = (children, size) => h('svg', {
+      viewBox: '0 0 16 16', width: size, height: size, fill: 'none', stroke: 'currentColor',
       strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round',
       'aria-hidden': true, focusable: false, className: 'nws-chipIcon',
     }, children)
-    const icoNoWorkspace = () => svg([
+    const icoNoWorkspace = (size = 16) => svg([
       h('path', { d: 'M1.5 4.4c0-.66.54-1.2 1.2-1.2h3l1.4 1.5h6.2c.66 0 1.2.54 1.2 1.2v6.5c0 .66-.54 1.2-1.2 1.2H2.7c-.66 0-1.2-.54-1.2-1.2V4.4Z' }),
       h('path', { d: 'M3 13 13 3' }),
-    ])
+    ], size)
 
     // ---- 1. hero entry: start a session outside every workspace --------
 
@@ -263,15 +268,22 @@ window.__ModuleLoader__.load({
         try { await start() } catch (e) { setError(msg(e)) } finally { setBusy(false) }
       }
       return h('button', {
-        type: 'button', className: 'nws-card', disabled: busy, title,
+        type: 'button', className: 'nws-card', disabled: busy,
+        // The guide only prints a description while it lists few entries, so the
+        // hover hint keeps the copy available in a crowded one.
+        title: description === undefined ? title : `${title} — ${description}`,
         'data-sidebar-right-guide-entry': 'noworkspace',
         onClick: () => { void onClick() },
       },
-        h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(22)),
+        h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(24)),
         h('span', { className: 'nws-cardText' },
           h('span', { className: 'nws-cardTitle' }, busy ? t('chip.busy') : title),
-          h('span', { className: error === null ? 'nws-cardDesc' : 'nws-cardError', role: error === null ? undefined : 'alert' },
-            error === null ? (description ?? t('card.description')) : t('chip.error', { message: error }))))
+          // No fallback copy: the guide passes a description only while it lists
+          // few enough entries, and a card that always carried one would stand
+          // out beside its neighbours the moment the guide drops theirs.
+          error !== null
+            ? h('span', { className: 'nws-cardError', role: 'alert' }, t('chip.error', { message: error }))
+            : description !== undefined && h('span', { className: 'nws-cardDesc' }, description)))
     }
 
     // ---- 2. settings row ----------------------------------------------
