@@ -29,9 +29,15 @@ export const DEFAULT_DIR = '~/Documents/dsh'
  * Plugin configuration. `defaultDir` accepts an absolute host path or a
  * `~`-rooted home path; the Client expands `~` against `ctx.remote.$host.home`
  * and Host `session.create` recursively creates whatever path it receives.
+ *
+ * `volatile()` is what makes the field exist as far as settings are concerned:
+ * the settings service projects a form through `volatileForm()`, which keeps
+ * only volatile nodes and returns undefined for an object that has none. An
+ * entry without a volatile field is filtered out of `describe()` entirely, so
+ * its namespace never reaches the client and writes to it are refused.
  */
 export const Config = z.object({
-  defaultDir: z.string().default(DEFAULT_DIR),
+  defaultDir: z.string().default(DEFAULT_DIR).volatile(),
 })
 
 /** Session-id prefix the browser half mints; the Host half recognizes its own sessions by it. */
