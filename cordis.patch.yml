@@ -1,0 +1,3 @@
+- insert:
+    - id: noworkspace-session
+      name: 'dsh-plugin-noworkspace-session'
