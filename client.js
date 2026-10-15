@@ -237,8 +237,14 @@ window.__ModuleLoader__.load({
      * @param props - `size` in pixels, as the guide's icon contract passes it.
      * @returns the element to draw.
      */
-    function GuideIcon({ size }) {
-      return icoNoWorkspace(20, typeof size === 'number' && size < 20 ? 1.3 : undefined)
+    /**
+     * Glyph for the guide capsule; the registry wants a component, not an element.
+     * The registry's own size hint is ignored: this glyph has one good size, and
+     * the 26px box the guide draws it in centers whatever it returns.
+     * @returns the element to draw.
+     */
+    function GuideIcon() {
+      return icoNoWorkspace(20)
     }
 
     /**
