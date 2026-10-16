@@ -201,8 +201,10 @@ export function apply(ctx, config) {
    *
    * Deleting the mount is the browser half's abandonment decision (the session
    * was blank, never current, or left behind); this only reacts to it, at the
-   * tick's latency, and only removes a folder that is empty and belongs to no
-   * live session.
+   * tick's latency, and only removes a folder that is empty and whose session
+   * never carried a message. The live-session store is deliberately NOT consulted
+   * here: an abandoned session stays live in it (its agent is still in memory),
+   * so treating that as "in use" would spare exactly the folders meant to go.
    */
   const reclaimAbandonedMounts = async () => {
     if (mounts.size === 0) return
@@ -214,18 +216,11 @@ export function apply(ctx, config) {
     } catch {
       return
     }
-    const liveFolders = new Set()
-    try {
-      for (const session of ctx.get('sessions')?.list?.() ?? []) {
-        const cwd = session?.header?.cwd
-        if (typeof cwd === 'string' && cwd !== '') liveFolders.add(resolve(cwd).toLowerCase())
-      }
-    } catch { /* the live list guards the sweep, it does not gate it */ }
     for (const [sessionId, cwd] of [...mounts]) {
       if (liveWorkspaces.some((workspace) => workspace.sessionIds.includes(sessionId))) continue
       mounts.delete(sessionId)
       if (usedSessions.has(sessionId)) continue
-      if (typeof cwd !== 'string' || cwd === '' || liveFolders.has(resolve(cwd).toLowerCase())) continue
+      if (typeof cwd !== 'string' || cwd === '') continue
       try {
         await removeEmptyTaskFolder(cwd)
       } catch (error) {
