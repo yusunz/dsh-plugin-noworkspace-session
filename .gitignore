@@ -8,5 +8,3 @@ node_modules/
 项目日志.md
 INSTALL.md
 
-# 开发用回归测试：仅本地联调使用，不进版本库
-tests/
