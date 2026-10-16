@@ -22,7 +22,7 @@
  */
 import { readdir, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 /** Default task folder before an operator overrides it in Settings. `~` is expanded in the browser. */
@@ -47,6 +47,8 @@ export const Config = z.object({
 const SESSION_PREFIX = 'session-nws-'
 /** Fragment identifying this plugin's settings namespace in the Host descriptors. */
 const ENTRY_HINT = 'noworkspace'
+/** How often a mount the browser half retired is noticed. */
+const RECLAIM_POLL_MS = 1000
 /** Temporary-workspace title prefix; the browser half identifies its mounts by it when sweeping. */
 const MOUNT_TITLE_PREFIX = '无项目任务 · '
 /** Task-folder naming this plugin mints: `<base>\<YYYY-MM-DD>\<HH-MM-SS>`. */
@@ -119,10 +121,24 @@ export function apply(ctx, config) {
 
   /** Sessions already handled, so a retirement is never undone by a later announcement. */
   const handled = new Set()
+  /**
+   * Mounts this process created, and the sessions that have carried a message.
+   *
+   * The browser half owns the "the operator left" decision — its sweep deletes
+   * the mount — so the Host's part is only to notice that a mount of its own is
+   * gone and, when that session never carried a message, reclaim the empty task
+   * folder right away instead of leaving it for the next start.
+   */
+  const mounts = new Map()
+  const usedSessions = new Set()
+  const track = {
+    remember: (sessionId, cwd) => { mounts.set(sessionId, cwd) },
+    release: (sessionId) => { usedSessions.add(sessionId); mounts.delete(sessionId) },
+  }
   const consider = (sessionId, cwd) => {
     if (handled.has(sessionId)) return
     handled.add(sessionId)
-    void mount(registryOf(), sessionId, cwd, report)
+    void mount(registryOf(), sessionId, cwd, report, track)
   }
 
   /**
@@ -175,8 +191,52 @@ export function apply(ctx, config) {
   // Ungrouped is the session's real home.
   ctx.on('api-session/activity', (sessionId) => {
     if (typeof sessionId !== 'string') return
+    // A message makes the session real work: from here its folder stays for good.
+    track.release(sessionId)
     void unmount(registryOf(), sessionId, report)
   })
+
+  /**
+   * Reclaim a task folder whose mount the browser half retired.
+   *
+   * Deleting the mount is the browser half's abandonment decision (the session
+   * was blank, never current, or left behind); this only reacts to it, at the
+   * tick's latency, and only removes a folder that is empty and belongs to no
+   * live session.
+   */
+  const reclaimAbandonedMounts = async () => {
+    if (mounts.size === 0) return
+    const registry = registryOf()
+    if (registry === undefined) return
+    let liveWorkspaces
+    try {
+      liveWorkspaces = registry.list()
+    } catch {
+      return
+    }
+    const liveFolders = new Set()
+    try {
+      for (const session of ctx.get('sessions')?.list?.() ?? []) {
+        const cwd = session?.header?.cwd
+        if (typeof cwd === 'string' && cwd !== '') liveFolders.add(resolve(cwd).toLowerCase())
+      }
+    } catch { /* the live list guards the sweep, it does not gate it */ }
+    for (const [sessionId, cwd] of [...mounts]) {
+      if (liveWorkspaces.some((workspace) => workspace.sessionIds.includes(sessionId))) continue
+      mounts.delete(sessionId)
+      if (usedSessions.has(sessionId)) continue
+      if (typeof cwd !== 'string' || cwd === '' || liveFolders.has(resolve(cwd).toLowerCase())) continue
+      try {
+        await removeEmptyTaskFolder(cwd)
+      } catch (error) {
+        report(`could not reclaim the task folder for session ${sessionId}: ${String(error)}`)
+      }
+    }
+  }
+  ctx.effect(() => {
+    const timer = setInterval(() => { void reclaimAbandonedMounts() }, RECLAIM_POLL_MS)
+    return () => { clearInterval(timer) }
+  }, 'noworkspace-session: abandoned mount reclaim')
 
   // Two startup duties, each with its own precondition.
   //
@@ -212,6 +272,25 @@ function taskFolderRoot(raw) {
     ? join(homedir(), trimmed.slice(1))
     : trimmed
   return resolve(expanded)
+}
+
+/**
+ * Remove one abandoned task folder while it is empty, then its date folder once
+ * that empties too. `rmdir` refuses a non-empty directory, so a folder the agent
+ * wrote into is never touched.
+ * @param cwd The task folder the reclaimed mount was created for.
+ */
+async function removeEmptyTaskFolder(cwd) {
+  const folder = resolve(cwd)
+  try {
+    await rmdir(folder)
+  } catch {
+    return
+  }
+  const parent = dirname(folder)
+  if (DATE_FOLDER.test(basename(parent))) {
+    try { await rmdir(parent) } catch { /* still holds other task folders */ }
+  }
 }
 
 /**
@@ -298,7 +377,7 @@ function delay(ms) {
  * @param cwd The session's project directory (the task folder).
  * @param report Operator-facing diagnostic sink.
  */
-async function mount(registry, sessionId, cwd, report) {
+async function mount(registry, sessionId, cwd, report, track) {
   if (registry === undefined) {
     report(`session ${sessionId} could not be mounted: the profile composes no workspace registry`)
     return
@@ -312,6 +391,7 @@ async function mount(registry, sessionId, cwd, report) {
     const existing = await registry.resolveByPath(cwd)
     const workspace = existing ?? await registry.create(cwd, `${MOUNT_TITLE_PREFIX}${stamp()}`)
     await workspace.attachSession(sessionId)
+    track?.remember(sessionId, cwd)
   } catch (error) {
     // Everything still works without the mount: the hero keeps its native
     // "choose a workspace" state, so this is a warning rather than a failure.
