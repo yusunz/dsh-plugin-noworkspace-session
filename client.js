@@ -288,7 +288,10 @@ window.__ModuleLoader__.load({
       const list = useSessions((s) => s)
       const current = mainSessionId(list)
       const summary = current === undefined ? undefined : list.byId[current]
-      const own = summary !== undefined && isTaskFolder(summary.cwd)
+      // Ours is decided by this page's own ledger plus the legacy id prefix. The
+      // client summary carries no cwd, so nothing on this path may depend on one.
+      const own = typeof current === 'string'
+        && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))
       if (seatTaken() || summary === undefined || summary.blank !== true || own) return null
       return h('div', { className: 'nws-dock' },
         h('div', { className: 'nws-dockInner' }, h(UngroupedChip, { start, t })))
@@ -467,7 +470,7 @@ window.__ModuleLoader__.load({
       const start = async () => {
         const list = ctx.sessions.list.getSnapshot()
         const current = mainSessionId(list)
-        if (typeof current === 'string' && list.byId[current]?.blank === true && isTaskFolder(list.byId[current]?.cwd)) {
+        if (typeof current === 'string' && list.byId[current]?.blank === true && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))) {
           ctx.uiWorkspace.openSession(current)
           return
         }
@@ -512,7 +515,7 @@ window.__ModuleLoader__.load({
         // mount deleted here could be the blank Session that restore needs.
         if (current === undefined) return
         const currentRow = sessions.byId[current]
-        if (typeof current === 'string' && currentRow?.blank === true && (isTaskFolder(currentRow?.cwd) || current.startsWith(LEGACY_ID_PREFIX))) {
+        if (typeof current === 'string' && currentRow?.blank === true && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))) {
           // Adoption complete: from here the session is an ordinary page, and
           // leaving it must retire the mount on the spot.
           adopted.add(current)
