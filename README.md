@@ -2,6 +2,8 @@
 
 为 DeepSeek Harness 增加**未分组（无工作区）会话**：点一下就开一个不占用任何项目工作区的会话，输入区仍是 DSH 原生那一个——模型选择、权限、附件、斜杠命令全部照旧。
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/yusunz/dsh-plugin-noworkspace-session)
+
 ## 为什么需要它
 
 DSH 的输入区要求会话属于某个工作区；未分组会话在原生判定里是"空白会话"，输入区会被禁用。本插件在创建会话后，**临时**把它挂到与它自己工作目录同名的工作区上，让原生输入区可用；你发出第一条消息后，这个临时工作区被删除，会话落回**未分组**并照常保留、可恢复。
