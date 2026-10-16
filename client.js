@@ -39,8 +39,37 @@ window.__ModuleLoader__.load({
     const ENTRY_IDS = [ENTRY_ID, `include:${ENTRY_ID}`, 'dsh-plugin-noworkspace-session']
     /** Distinctive fragment that identifies this plugin's namespace in the mirror. */
     const NAMESPACE_HINT = 'noworkspace'
-    /** Owner-prop prefix that marks this plugin's sessions to the Host half. */
-    const SESSION_PREFIX = 'session-nws-'
+    /**
+     * Session ids are minted in DSH's own shape (`session-<uuid>`): other tools
+     * parse them (@hualiong/dsh-session-delete rejects anything else). The old
+     * `session-nws-` prefix is kept only to recognize sessions created before.
+     */
+    const SESSION_ID_PREFIX = 'session-'
+    const LEGACY_ID_PREFIX = 'session-nws-'
+    /** Task-folder naming this plugin mints: `<root>\<YYYY-MM-DD>\<HH-MM-SS>`. */
+    const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}$/
+    const TIME_FOLDER = /^\d{2}-\d{2}-\d{2}$/
+
+    /**
+     * Whether a session's cwd is one of this plugin's task folders. This — not the
+     * id — marks a session as ours, so ids stay standard and a session the
+     * operator opened in that folder by hand gets the same lifecycle.
+     * @param cwd Session working directory, from its summary.
+     * @returns whether it lies under the configured root in the date/time shape.
+     */
+    function isTaskFolder(cwd) {
+      if (typeof cwd !== 'string' || cwd === '') return false
+      try {
+        const root = expandHome(readDefaultDir(), hostHome()).replace(/[\\/]+$/, '')
+        const normalizedCwd = cwd.replace(/\\/g, '/')
+        const normalizedRoot = root.replace(/\\/g, '/')
+        if (!normalizedCwd.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) return false
+        const rest = normalizedCwd.slice(normalizedRoot.length + 1).split('/')
+        return rest.length === 2 && DATE_FOLDER.test(rest[0]) && TIME_FOLDER.test(rest[1])
+      } catch {
+        return false
+      }
+    }
     /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
     const MOUNT_TITLE_PREFIX = '无项目任务 · '
     /** How long a just-created mount is protected while `openSession` catches up. */
@@ -259,7 +288,7 @@ window.__ModuleLoader__.load({
       const list = useSessions((s) => s)
       const current = mainSessionId(list)
       const summary = current === undefined ? undefined : list.byId[current]
-      const own = typeof current === 'string' && current.startsWith(SESSION_PREFIX)
+      const own = summary !== undefined && isTaskFolder(summary.cwd)
       if (seatTaken() || summary === undefined || summary.blank !== true || own) return null
       return h('div', { className: 'nws-dock' },
         h('div', { className: 'nws-dockInner' }, h(UngroupedChip, { start, t })))
@@ -404,7 +433,7 @@ window.__ModuleLoader__.load({
         const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
         const time = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
         const cwd = `${base}${sep}${date}${sep}${time}`
-        const sessionId = `${SESSION_PREFIX}${uid()}`
+        const sessionId = `${SESSION_ID_PREFIX}${uid()}`
         // Tracked BEFORE the create call, and keyed on the id this half minted:
         // the Host mounts the session *during* that call, so a sweep triggered by
         // the resulting workspace change must already recognize the mount as ours.
@@ -438,7 +467,7 @@ window.__ModuleLoader__.load({
       const start = async () => {
         const list = ctx.sessions.list.getSnapshot()
         const current = mainSessionId(list)
-        if (typeof current === 'string' && current.startsWith(SESSION_PREFIX) && list.byId[current]?.blank === true) {
+        if (typeof current === 'string' && list.byId[current]?.blank === true && isTaskFolder(list.byId[current]?.cwd)) {
           ctx.uiWorkspace.openSession(current)
           return
         }
@@ -483,7 +512,7 @@ window.__ModuleLoader__.load({
         // mount deleted here could be the blank Session that restore needs.
         if (current === undefined) return
         const currentRow = sessions.byId[current]
-        if (typeof current === 'string' && current.startsWith(SESSION_PREFIX) && currentRow?.blank === true) {
+        if (typeof current === 'string' && currentRow?.blank === true && (isTaskFolder(currentRow?.cwd) || current.startsWith(LEGACY_ID_PREFIX))) {
           // Adoption complete: from here the session is an ordinary page, and
           // leaving it must retire the mount on the spot.
           adopted.add(current)

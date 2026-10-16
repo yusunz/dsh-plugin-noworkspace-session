@@ -43,8 +43,29 @@ export const Config = z.object({
   defaultDir: z.string().default(DEFAULT_DIR).volatile(),
 })
 
-/** Session-id prefix the browser half mints; the Host half recognizes its own sessions by it. */
-const SESSION_PREFIX = 'session-nws-'
+/**
+ * Legacy id marker: kept so sessions created before ids took DSH's own shape are
+ * still recognized. New sessions are recognized by cwd instead.
+ */
+const LEGACY_ID_PREFIX = 'session-nws-'
+
+/**
+ * Whether a session cwd (or a mount path) is a task folder this feature owns:
+ * `<configured root>\<YYYY-MM-DD>\<HH-MM-SS>`. The id is deliberately not the
+ * marker — ids must stay in DSH's shape for other tools to parse them, and a
+ * session the operator opened in that folder by hand deserves the same lifecycle.
+ * @param root Effective task-folder root.
+ * @param path Candidate session cwd or workspace path.
+ * @returns whether the path lies under the root in the date/time shape.
+ */
+function isTaskFolder(root, path) {
+  if (typeof root !== 'string' || root === '' || typeof path !== 'string' || path === '') return false
+  const normalizedRoot = resolve(root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const normalizedPath = resolve(path).replace(/\\/g, '/')
+  if (!normalizedPath.toLowerCase().startsWith(`${normalizedRoot}/`)) return false
+  const rest = normalizedPath.slice(normalizedRoot.length + 1).split('/')
+  return rest.length === 2 && DATE_FOLDER.test(rest[0]) && TIME_FOLDER.test(rest[1])
+}
 /** Fragment identifying this plugin's settings namespace in the Host descriptors. */
 const ENTRY_HINT = 'noworkspace'
 /** How often a mount the browser half retired is noticed. */
@@ -182,7 +203,7 @@ export function apply(ctx, config) {
   ctx.on('api-session/added', (summary) => {
     armFolderSweep()
     if (summary === undefined || typeof summary.sessionId !== 'string') return
-    if (!summary.sessionId.startsWith(SESSION_PREFIX)) return
+    if (!isTaskFolder(readConfiguredDir(), summary.cwd) && !summary.sessionId.startsWith(LEGACY_ID_PREFIX)) return
     if (summary.blank !== true) return
     consider(summary.sessionId, summary.cwd)
   })
@@ -242,7 +263,7 @@ export function apply(ctx, config) {
   void (async () => {
     try {
       const registry = await waitForRegistry(registryOf)
-      if (registry !== undefined) await retireLeftovers(registry, report)
+      if (registry !== undefined) await retireLeftovers(registry, report, readConfiguredDir)
     } catch (error) {
       report(`leftover mount sweep skipped: ${String(error)}`)
     }
@@ -414,15 +435,16 @@ async function unmount(registry, sessionId, report) {
 }
 
 /**
- * Retire every workspace left behind by an earlier process.
+ * Retire every mount left behind by an earlier process. Keyed on the mount path's
+ * task-folder shape, so it collects mounts from before ids became standard too.
  * @param registry Host workspace registry, when the profile composes one.
  * @param report Operator-facing diagnostic sink.
+ * @param readDir Resolves the configured task-folder root.
  */
-async function retireLeftovers(registry, report) {
+async function retireLeftovers(registry, report, readDir) {
   for (const workspace of registry.list()) {
-    const members = [...workspace.sessionIds]
-    if (members.length === 0) continue
-    if (!members.every((id) => id.startsWith(SESSION_PREFIX))) continue
+    if (workspace.sessionIds.length === 0) continue
+    if (!isTaskFolder(readDir(), workspace.path)) continue
     try {
       await registry.delete(workspace.id)
     } catch (error) {
