@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-noworkspace-session",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "为 DSH 增加「不在工作区中工作」入口：创建未分组会话，使用 DSH 原生输入区，并在通用设置中提供无项目任务文件夹。",
   "type": "module",
   "main": "index.js",
