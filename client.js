@@ -46,30 +46,6 @@ window.__ModuleLoader__.load({
      */
     const SESSION_ID_PREFIX = 'session-'
     const LEGACY_ID_PREFIX = 'session-nws-'
-    /** Task-folder naming this plugin mints: `<root>\<YYYY-MM-DD>\<HH-MM-SS>`. */
-    const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}$/
-    const TIME_FOLDER = /^\d{2}-\d{2}-\d{2}$/
-
-    /**
-     * Whether a session's cwd is one of this plugin's task folders. This — not the
-     * id — marks a session as ours, so ids stay standard and a session the
-     * operator opened in that folder by hand gets the same lifecycle.
-     * @param cwd Session working directory, from its summary.
-     * @returns whether it lies under the configured root in the date/time shape.
-     */
-    function isTaskFolder(cwd) {
-      if (typeof cwd !== 'string' || cwd === '') return false
-      try {
-        const root = expandHome(readDefaultDir(), hostHome()).replace(/[\\/]+$/, '')
-        const normalizedCwd = cwd.replace(/\\/g, '/')
-        const normalizedRoot = root.replace(/\\/g, '/')
-        if (!normalizedCwd.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) return false
-        const rest = normalizedCwd.slice(normalizedRoot.length + 1).split('/')
-        return rest.length === 2 && DATE_FOLDER.test(rest[0]) && TIME_FOLDER.test(rest[1])
-      } catch {
-        return false
-      }
-    }
     /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
     const MOUNT_TITLE_PREFIX = '无项目任务 · '
     /** How long a just-created mount is protected while `openSession` catches up. */
