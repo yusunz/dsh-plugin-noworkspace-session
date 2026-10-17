@@ -288,11 +288,11 @@ window.__ModuleLoader__.load({
       const list = useSessions((s) => s)
       const current = mainSessionId(list)
       const summary = current === undefined ? undefined : list.byId[current]
-      // Ours is decided by this page's own ledger plus the legacy id prefix. The
-      // client summary carries no cwd, so nothing on this path may depend on one.
-      const own = typeof current === 'string'
-        && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))
-      if (seatTaken() || summary === undefined || summary.blank !== true || own) return null
+      // Shown on every blank Session, this plugin's own scratch session included:
+      // hiding there only saved a redundant chip and turned one stale bit of state
+      // into a missing entry point. `seatTaken` still keeps a newer harness's hero
+      // seat from showing both.
+      if (seatTaken() || summary === undefined || summary.blank !== true) return null
       return h('div', { className: 'nws-dock' },
         h('div', { className: 'nws-dockInner' }, h(UngroupedChip, { start, t })))
     }
