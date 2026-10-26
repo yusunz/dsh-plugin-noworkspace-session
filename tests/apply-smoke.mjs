@@ -10,8 +10,9 @@ rmSync(base, { recursive: true, force: true })
 const abandoned = join(base, '2026-10-27', '09-00-00')
 const live = join(base, '2026-10-27', '09-00-01')
 const nonempty = join(base, '2026-10-27', '09-00-02')
-const persisted = join(base, '2026-10-27', '09-00-04')
-for (const dir of [abandoned, live, nonempty, persisted]) mkdirSync(dir, { recursive: true })
+const persistedBlank = join(base, '2026-10-27', '09-00-04')
+const persistedUsed = join(base, '2026-10-27', '09-00-05')
+for (const dir of [abandoned, live, nonempty, persistedBlank, persistedUsed]) mkdirSync(dir, { recursive: true })
 writeFileSync(join(nonempty, 'keep.txt'), 'x')
 
 const workspaces = []
@@ -50,7 +51,23 @@ const allowed = {
   get: (key) => {
     if (key === 'sessions') return { list: () => [{ header: { cwd: live } }] }
     if (key === 'workspaceRegistry') return registry
-    if (key === 'sessionPersistence') return { list: async () => [{ header: { cwd: persisted } }] }
+    if (key === 'sessionPersistence') {
+      return {
+        list: async () => [
+          { header: { id: 'stored-blank', cwd: persistedBlank } },
+          { header: { id: 'stored-used', cwd: persistedUsed } },
+        ],
+        open: async (id) => ({
+          // 空白会话也有创建期事件，真正的判据是是否出现过 turn/start
+          read: async () => ({
+            events: id === 'stored-used'
+              ? [{ type: 'permission/preset' }, { type: 'turn/start' }]
+              : [{ type: 'permission/preset' }, { type: 'sandbox/mode' }],
+          }),
+          close: async () => {},
+        }),
+      }
+    }
     return undefined
   },
   logger: { warn: (...args) => console.log('[warn]', ...args) },
@@ -104,7 +121,8 @@ await wait(2300) // 越过 2s settle，触发启动期维护
 expect('空任务目录在启动维护中被回收', !existsSync(abandoned))
 expect('在用的任务目录保留', existsSync(live))
 expect('有内容的任务目录保留', existsSync(nonempty) && existsSync(join(nonempty, 'keep.txt')))
-expect('有持久记录的任务目录也保留', existsSync(persisted))
+expect('无 turn/start 的空白会话目录被回收', !existsSync(persistedBlank))
+expect('有 turn/start 的持久会话目录保留', existsSync(persistedUsed))
 expect('日期目录仍含在用/有内容子目录', existsSync(join(base, '2026-10-27')))
 
 for (const dispose of disposers) dispose()

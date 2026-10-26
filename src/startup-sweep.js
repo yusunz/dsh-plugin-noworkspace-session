@@ -10,7 +10,7 @@
  * the side views that resume right behind it reach the live list first, and a
  * fallback arm covers a Host nobody restores into (headless).
  */
-import { canonicalPath, canonicalTaskRoot, sweepEmptyTaskFolders } from './task-folder.js'
+import { canonicalPath, canonicalTaskRoot, normalizePath, sweepEmptyTaskFolders } from './task-folder.js'
 
 /**
  * Create the one-shot startup maintenance.
@@ -36,29 +36,79 @@ export function createStartupMaintenance({
   let settleTimer
   let fallbackTimer
 
-  const addCwd = async (keep, cwd) => {
-    if (typeof cwd === 'string' && cwd !== '') keep.add(await canonicalPath(cwd))
-  }
-
-  /**
-   * Canonical cwds whose folders must survive: live sessions plus every stored
-   * session. Stored sessions matter because resume does not recreate a cwd, so a
-   * persisted session whose folder was swept would later fail its tool calls.
-   */
-  const keepCwds = async () => {
+  /** Canonical cwds of the live sessions, whose folders must survive. */
+  const liveCwds = async () => {
     const keep = new Set()
     try {
-      for (const session of ctx.get('sessions')?.list?.() ?? []) await addCwd(keep, session?.header?.cwd)
+      for (const session of ctx.get('sessions')?.list?.() ?? []) {
+        const cwd = session?.header?.cwd
+        if (typeof cwd === 'string' && cwd !== '') keep.add(await canonicalPath(cwd))
+      }
     } catch (error) {
       report(`could not read the live session list: ${String(error)}`)
     }
+    return keep
+  }
+
+  /**
+   * Stored sessions grouped by canonical cwd.
+   *
+   * A stored session keeps its folder only when it actually carries events: a
+   * blank session (header line only) is what an abandoned scratch session leaves
+   * behind, and its empty folder must still be reclaimed. Resume does not recreate
+   * a cwd, so a stored session with events must keep its folder.
+   * @returns Map from normalized cwd to stored session ids.
+   */
+  const persistedByCwd = async () => {
+    const byCwd = new Map()
     try {
       const persistence = ctx.get('sessionPersistence')
-      for (const record of await persistence?.list?.() ?? []) await addCwd(keep, record?.header?.cwd)
+      for (const record of await persistence?.list?.() ?? []) {
+        const id = record?.header?.id
+        const cwd = record?.header?.cwd
+        if (typeof id !== 'string' || typeof cwd !== 'string' || cwd === '') continue
+        const key = await canonicalPath(cwd)
+        const ids = byCwd.get(key)
+        if (ids === undefined) byCwd.set(key, [id])
+        else ids.push(id)
+      }
     } catch (error) {
       report(`could not read the persisted session list: ${String(error)}`)
     }
-    return keep
+    return byCwd
+  }
+
+  /**
+   * Whether a stored session ever started a turn.
+   *
+   * DSH writes setup events (permission preset, sandbox mode, approval policy, …)
+   * when the Agent is created, but the session stays blank until `turn/start` —
+   * so event count alone would keep every abandoned scratch session. A failed or
+   * unavailable read keeps the folder: deleting the cwd of a session that may
+   * carry history is worse than leaving an empty directory behind.
+   * @param sessionId - Stored session id.
+   * @returns whether the log carries a `turn/start` event.
+   */
+  const sessionHasTurns = async (sessionId) => {
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence?.open === undefined) return true
+    try {
+      const handle = await persistence.open(sessionId, 'read')
+      try {
+        const chunk = 200
+        for (let offset = 0, pages = 0; pages < 100; offset += chunk, pages += 1) {
+          const slice = await handle.read(offset, chunk)
+          const events = slice?.events ?? []
+          if (events.some((event) => event?.type === 'turn/start')) return true
+          if (events.length < chunk) return false
+        }
+        return true
+      } finally {
+        try { await handle.close() } catch { /* read handle close is uncancellable best-effort */ }
+      }
+    } catch {
+      return true
+    }
   }
 
   const run = async () => {
@@ -72,7 +122,16 @@ export function createStartupMaintenance({
       if (disposed || root === undefined) return
       await ledger.retireLeftovers(root)
       if (disposed) return
-      await sweepEmptyTaskFolders(root, await keepCwds())
+      const keep = await liveCwds()
+      const persisted = await persistedByCwd()
+      const shouldKeep = async (folder) => {
+        const ids = persisted.get(normalizePath(folder))
+        if (ids === undefined) return false
+        for (const id of ids) if (await sessionHasTurns(id)) return true
+        return false
+      }
+      if (disposed) return
+      await sweepEmptyTaskFolders(root, keep, shouldKeep)
     } catch (error) {
       report(`startup maintenance skipped: ${String(error)}`)
     }

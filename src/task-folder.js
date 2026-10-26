@@ -109,14 +109,16 @@ export function isTaskFolder(root, path) {
 }
 
 /**
- * Reclaim the empty task folders that no live or persisted session uses any more.
+ * Reclaim the empty task folders that no live or stored-with-events session uses.
  *
  * `rmdir` refuses a non-empty directory, so a directory holding files is always
  * left as it is; a date folder is removed only once its last task folder is gone.
  * @param root - Canonical task-folder root.
  * @param live - Normalized cwds of live sessions, whose folders must survive.
+ * @param shouldKeep - Optional async predicate for stored sessions; a folder it
+ *   accepts survives even though it is empty.
  */
-export async function sweepEmptyTaskFolders(root, live) {
+export async function sweepEmptyTaskFolders(root, live, shouldKeep) {
   if (typeof root !== 'string' || root === '') return
   let dates
   try {
@@ -139,6 +141,7 @@ export async function sweepEmptyTaskFolders(root, live) {
       if (!time.isDirectory() || !TIME_FOLDER.test(time.name)) continue
       const folder = join(datePath, time.name)
       if (keep.has(normalizePath(folder))) continue
+      if (shouldKeep !== undefined && await shouldKeep(folder)) continue
       try {
         await rmdir(folder)
       } catch {
