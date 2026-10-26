@@ -1,33 +1,62 @@
 /**
- * 回归冒烟测试（针对 "cannot get property X without inject" 那次宿主崩溃）。
- *
- * 用一个模仿 cordis 服务守卫的 mock ctx 调用真实的 apply()：
- *   - 任何未在白名单里的属性访问（如 ctx.config / ctx.sessions）都抛与线上相同的错误；
- *   - 捕获所有 unhandledRejection —— 那次崩溃正是异步 IIFE 里未捕获的拒绝。
- * 随后伪造一次 api-session/added 触发清扫，验证空目录被删、有内容的目录保留。
+ * 端到端冒烟（v0.3）：用带服务守卫的 mock ctx 调真实 apply()，验证
+ *   挂载（空白 + 任务目录形状）→ 首条消息卸载；subagent/非空白不挂载；
+ *   启动期空目录回收（2s settle）与有内容/在用目录保留；不产生未捕获拒绝。
  */
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const failures = []
-process.on('unhandledRejection', (reason) => {
-  failures.push(`unhandledRejection: ${String(reason)}`)
-})
+const unhandled = []
+process.on('unhandledRejection', (reason) => { unhandled.push(String(reason)) })
 
 const base = join(process.env.TEMP, 'nws-smoke-base')
 rmSync(base, { recursive: true, force: true })
-mkdirSync(join(base, '2026-10-15', '21-00-00'), { recursive: true })
-mkdirSync(join(base, '2026-10-15', '21-00-01'), { recursive: true })
-writeFileSync(join(base, '2026-10-15', '21-00-01', 'keep.txt'), 'x')
+const abandoned = join(base, '2026-10-27', '09-00-00')
+const live = join(base, '2026-10-27', '09-00-01')
+const nonempty = join(base, '2026-10-27', '09-00-02')
+for (const dir of [abandoned, live, nonempty]) mkdirSync(dir, { recursive: true })
+writeFileSync(join(nonempty, 'keep.txt'), 'x')
+
+const workspaces = []
+const registry = {
+  list: () => workspaces,
+  resolveByPath: async (path) => workspaces.find((workspace) => workspace.path === path),
+  create: async (path, title) => {
+    const workspace = {
+      id: `w${workspaces.length + 1}`, title, path, createdAt: new Date().toISOString(), sessionIds: [],
+      attachSession: async (sessionId) => { workspace.sessionIds.push(sessionId) },
+    }
+    workspaces.push(workspace)
+    return workspace
+  },
+  delete: async (id) => {
+    const at = workspaces.findIndex((workspace) => workspace.id === id)
+    if (at < 0) return false
+    workspaces.splice(at, 1)
+    return true
+  },
+}
 
 const listeners = new Map()
+const disposers = []
+const childContext = {
+  effect: (fn) => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) },
+  settings: {
+    configure: () => () => {},
+    describe: () => [{ ns: 'noworkspace-session', value: { defaultDir: base } }],
+  },
+}
 const allowed = {
   on: (name, fn) => { listeners.set(name, fn) },
-  inject: () => {},
-  effect: () => {},
-  get: () => undefined,
-  root: { get: () => undefined },
-  logger: { warn: (...args) => { console.log('[warn]', ...args) } },
+  inject: (deps, callback) => { if (deps.includes('settings')) callback(childContext) },
+  effect: (fn) => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) },
+  get: (key) => {
+    if (key === 'sessions') return { list: () => [{ header: { cwd: live } }] }
+    if (key === 'workspaceRegistry') return registry
+    return undefined
+  },
+  logger: { warn: (...args) => console.log('[warn]', ...args) },
   fiber: {},
 }
 const ctx = new Proxy(allowed, {
@@ -38,31 +67,52 @@ const ctx = new Proxy(allowed, {
 })
 
 const { apply } = await import(new URL('../index.js', import.meta.url).href)
-apply(ctx, { defaultDir: base })
+// 走 Volatile 引用路径（真实 Loader 交给 apply 的就是这种形状）
+apply(ctx, { defaultDir: { get: () => base } })
 console.log('apply 返回，未抛异常')
 
-// 伪造渲染端恢复时的第一次会话公告
-listeners.get('api-session/added')?.({ sessionId: 'session-probe', blank: false, cwd: base })
-console.log('已伪造 api-session/added')
+const announce = listeners.get('api-session/added')
+const activity = listeners.get('api-session/activity')
+const removed = listeners.get('api-session/removed')
+const expect = (label, ok) => { if (!ok) failures.push(label); console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`) }
+const wait = (ms) => new Promise((done) => { setTimeout(done, ms) })
+const workspaceOf = (sessionId) => workspaces.find((workspace) => workspace.sessionIds.includes(sessionId))
 
-// 等过 RESTORE_SETTLE_MS(2s) 与清扫完成
-await new Promise((done) => { setTimeout(done, 4000) })
+announce?.({ sessionId: 'session-a', blank: true, cwd: abandoned })
+announce?.({ sessionId: 'session-child', blank: true, cwd: abandoned, origin: 'subagent', parentSessionId: 'session-a' })
+announce?.({ sessionId: 'session-used', blank: false, cwd: nonempty })
+await wait(150)
 
-const list = readdirSync(base, { recursive: true }).map(String)
-console.log('剩余：', JSON.stringify(list))
+const mounted = workspaceOf('session-a')
+expect('空白任务目录会话被挂载', mounted !== undefined)
+expect('挂载标题带展示前缀', mounted?.title.startsWith('无项目任务 · ') === true)
+expect('挂载路径就是会话 cwd', mounted?.path === abandoned)
+expect('subagent 会话不被挂载', workspaceOf('session-child') === undefined)
+expect('非空白会话不被挂载', workspaceOf('session-used') === undefined)
 
-const expect = (label, condition) => {
-  if (!condition) failures.push(label)
-  console.log(`${condition ? 'PASS' : 'FAIL'}  ${label}`)
-}
-expect('空目录 2026-10-15/21-00-00 已被清扫', !list.some((p) => p.includes('21-00-00')))
-expect('有内容的 21-00-01 保留', list.some((p) => p.includes('keep.txt')))
-expect('无 unhandledRejection（宿主不会因此退出）', failures.length === 0)
+activity?.('session-a')
+await wait(80)
+expect('首条消息后挂载被卸载', workspaceOf('session-a') === undefined)
 
-if (failures.length > 0) {
-  console.log('未通过：')
-  for (const failure of failures) console.log(' -', failure)
-}
-console.log(failures.length === 0 ? '全部通过' : `${failures.length} 项未通过`)
+// 再挂一个，然后用 removed 事件放掉账本项：不应抛错
+const third = join(base, '2026-10-27', '09-00-03')
+mkdirSync(third, { recursive: true })
+announce?.({ sessionId: 'session-b', blank: true, cwd: third })
+await wait(80)
+expect('第二个会话也被挂载', workspaceOf('session-b') !== undefined)
+removed?.('session-b')
+
+await wait(2300) // 越过 2s settle，触发启动期维护
+expect('空任务目录在启动维护中被回收', !existsSync(abandoned))
+expect('在用的任务目录保留', existsSync(live))
+expect('有内容的任务目录保留', existsSync(nonempty) && existsSync(join(nonempty, 'keep.txt')))
+expect('日期目录仍含在用/有内容子目录', existsSync(join(base, '2026-10-27')))
+
+for (const dispose of disposers) dispose()
+await wait(80)
+expect('无未捕获拒绝（宿主不会因此退出）', unhandled.length === 0)
+if (unhandled.length > 0) console.log('未捕获拒绝：', unhandled)
+
+console.log(failures.length === 0 ? '全部通过' : `未通过：\n - ${failures.join('\n - ')}`)
 rmSync(base, { recursive: true, force: true })
 process.exit(failures.length === 0 ? 0 : 1)
