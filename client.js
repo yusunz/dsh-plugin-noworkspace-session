@@ -1,23 +1,16 @@
 /**
  * dsh-plugin-noworkspace-session — browser half.
  *
- * Two registrations, both additive — this plugin replaces no host UI:
- *   1. `conversation.input.dock` (list): one chip that starts a session outside
- *      every workspace. `conversation.hero.options` — the seat that would put it
- *      inside the hero row — is declared by newer harness builds only, so the
- *      registration is attempted there first and the dock takes over when the
- *      seat is absent. The shipped workspace picker is never touched, so its
- *      menu, modal and directory flow stay native.
- *   2. `settings.general.item` (list): the Codex-style default-folder row, read
- *      and written through the config form mirror (persists into the profile
- *      cordis.patch.yml).
+ * Three additive registrations, no shipped UI replaced: the hero row's options
+ * chip (`conversation.hero.options`), the no-project folder row
+ * (`settings.general.item`), and the right sidebar guide's tab type plus the
+ * card and pane body it opens.
  *
- * A session created here is ungrouped, so the shipped hero would render its
- * composer inert (`inert = hero && chipTitle === undefined`). The Host half
- * mounts the blank session in a temporary workspace at its own cwd, which makes
- * the native composer live; the first user message then retires that workspace
- * and the session falls back to Ungrouped. This half only waits for the mount
- * before opening the session.
+ * Cross-half contract: this half builds the task folder, creates the session
+ * with `sessions.create({ cwd })` (the Host mints the id), waits for the Host's
+ * mount in the workspace store, then opens it. The Host owns mounting and
+ * retirement; this half only abandons mounts it created or re-adopted on this
+ * page, recognized by workspace membership alone (never title or path).
  */
 window.__ModuleLoader__.load({
   id: 'dsh-plugin-noworkspace-session',
@@ -26,37 +19,38 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useState } = React
 
+    // ---- CONTRACT -----------------------------------------------------
+
+    /** Locale namespace owned by this plugin. */
     const NS = 'noworkspace'
-    /** `id` of this plugin's row in cordis.patch.yml; the loader may qualify it for us. */
+    /** `id` of this plugin's row in cordis.patch.yml; the loader may qualify it. */
     const ENTRY_ID = 'noworkspace-session'
     /**
-     * Settings namespaces this plugin's row may appear under. The Host keys a
-     * config form by the loader *entry* id, which is the patch id with an
-     * `include:` qualifier, and a bundle re-export can add the package name; the
-     * probing client reports `unavailable` for every spelling it does not serve,
-     * so the served one is picked from the describe mirror instead of assumed.
+     * Settings namespaces this plugin's row may be served under: a bundled entry
+     * is keyed by the loader entry id, which carries an `include:` qualifier, so
+     * the served spelling is read from the settings mirror instead of assumed.
      */
     const ENTRY_IDS = [ENTRY_ID, `include:${ENTRY_ID}`, 'dsh-plugin-noworkspace-session']
     /** Distinctive fragment that identifies this plugin's namespace in the mirror. */
     const NAMESPACE_HINT = 'noworkspace'
-    /**
-     * Session ids are minted in DSH's own shape (`session-<uuid>`): other tools
-     * parse them (@hualiong/dsh-session-delete rejects anything else). The old
-     * `session-nws-` prefix is kept only to recognize sessions created before.
-     */
-    const SESSION_ID_PREFIX = 'session-'
-    const LEGACY_ID_PREFIX = 'session-nws-'
-    /** Workspace-title prefix the Host half stamps; the sweep recognizes its own mounts by it. */
-    const MOUNT_TITLE_PREFIX = '无项目任务 · '
-    /** How long a just-created mount is protected while `openSession` catches up. */
-    const ADOPTION_WINDOW_MS = 15000
-    /** A mount never seen as the current Session is held this long before it counts as abandoned. */
-    const MOUNT_MIN_AGE_MS = 60000
-    /** Safety-net re-check; subscriptions already retire a group the moment the operator moves away. */
-    const MOUNT_SWEEP_INTERVAL_MS = 3000
-    const DEFAULT_DIR = '~/Documents/dsh'
-    /** Tab-type identity in the right sidebar registry; also the guide card's slot key. */
+    /** Tab-type identity in the right sidebar registry; also every guide seat's key. */
     const SIDEBAR_TYPE_ID = 'dsh-plugin-noworkspace-session'
+    /** Tab kind: what an opened tab of this type is, and the guide card's DOM marker. */
+    const SIDEBAR_KIND = 'noworkspace'
+    /** Task folder used when the setting is unset or the Host home is unknown. */
+    const DEFAULT_DIR = '~/Documents/dsh'
+    /** A mount younger than this may still be in the create → openSession window. */
+    const ADOPTION_WINDOW_MS = 15000
+    /** A mount never seen as the current session is held this long before it counts as abandoned. */
+    const MOUNT_MIN_AGE_MS = 60000
+    /** Safety-net re-check; subscriptions already retire a mount the moment the operator moves away. */
+    const MOUNT_SWEEP_INTERVAL_MS = 2000
+    /** How long `openSession` waits for the Host's mount before opening anyway. */
+    const MOUNT_WAIT_TIMEOUT_MS = 2000
+    /** Shape of one session folder under the task root: `<date>/<time>`. */
+    const TASK_DIR_PATTERN = /^\d{4}-\d{2}-\d{2}\/\d{2}-\d{2}-\d{2}$/
+
+    // ---- LOCALE -------------------------------------------------------
 
     const zh = {
       'chip.label': '不在工作区中工作',
@@ -92,22 +86,12 @@ window.__ModuleLoader__.load({
       'card.description': 'Start a session in the no-project task folder and open it in the main view',
     }
 
-    /* Chip geometry mirrors the agent-preset seat in the hero row
-       (ui-agent-preset AgentPresetSeat.module.css): same min-height, 8px side
-       padding, 4px gap and hover fill, so the two read as one line.
-       Harness builds without `conversation.hero.options` offer no additive seat
-       in that row, so the chip rides the composer dock and lifts itself onto the
-       row's baseline instead: the dock row collapses to zero height with -3px
-       vertical margins (cancelling the two stack gaps it would otherwise add),
-       and the chip is anchored one stack gap above it, right-aligned to the card
-       edge opposite the workspace chip.
-       The lifted box spans the row's width but must stay transparent to pointer
-       events — otherwise it would swallow clicks on the native workspace chip
-       sitting in the same line. */
+    // ---- CSS ----------------------------------------------------------
+    // Token-only. The chip mirrors the shipped workspace chip's geometry so the
+    // two read as one line; the guide capsule copies the shipped card's own
+    // sheet because a custom card replaces the shipped one wholesale.
+
     const CSS = `
-.nws-dock{position:relative;height:0;display:flex;justify-content:flex-end;margin:-3px 0}
-.nws-dockInner{position:absolute;left:0;right:0;bottom:calc(100% + var(--dsh-composer-stack-gap,6px));display:flex;justify-content:flex-end;max-width:calc(var(--dsh-composer-card-max-width,952px) - 4 * var(--dsh-composer-dock-inset,4px));margin:0 auto;pointer-events:none}
-.nws-dockInner>*{pointer-events:auto}
 .nws-chip{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:min(100%,240px);min-height:28px;padding:0 8px;border:none;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer}
 .nws-chip:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover)}
 .nws-chip:disabled{cursor:default;color:var(--dsw-alias-label-secondary)}
@@ -121,12 +105,13 @@ window.__ModuleLoader__.load({
 .nws-rowDesc{margin-top:4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .nws-rowError{margin-top:6px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .nws-rowControls{display:flex;align-items:center;gap:8px;flex:none}
-/* The guide capsule below copies the shipped card's own sheet
-   (ui-sidebar-right GuideBody.module.css .entry): same 380px cell, 56px
-   minimum, 14/20 padding, 0.5px border on the l3 border token, radius-xl and
-   the layer-1 fill. A custom card replaces the shipped one wholesale, so these
-   specs have to travel with it to stay indistinguishable in the column. */
-.nws-card{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl,10px);cursor:pointer}
+.nws-path{color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:right}
+.nws-btn{padding:5px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}
+.nws-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.nws-btn:disabled{opacity:.45;cursor:default}
+.nws-btnQuiet{border-color:transparent;color:var(--dsw-alias-label-secondary)}
+.nws-btnQuiet:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.nws-card{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl);cursor:pointer}
 .nws-card:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .nws-card:disabled{cursor:default;opacity:.65}
 .nws-card:focus-visible{outline:1px solid var(--dsw-alias-brand-primary);outline-offset:-1px}
@@ -135,24 +120,27 @@ window.__ModuleLoader__.load({
 .nws-cardTitle{overflow:hidden;font-size:14px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
 .nws-cardDesc{overflow:hidden;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
 .nws-cardError{overflow:hidden;color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}
-.nws-path{color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:right}
-.nws-btn{padding:5px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm,4px);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;line-height:18px;cursor:pointer;white-space:nowrap}
-.nws-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
-.nws-btn:disabled{opacity:.45;cursor:default}
-.nws-btnQuiet{border-color:transparent;color:var(--dsw-alias-label-secondary)}
-.nws-btnQuiet:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.nws-pane{box-sizing:border-box;display:flex;flex:1;flex-direction:column;gap:12px;min-height:0;padding:20px 16px;overflow:auto;color:var(--dsw-alias-label-primary);font:inherit}
+.nws-paneTitle{font-size:14px;font-weight:500;line-height:20px}
+.nws-paneDesc{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.nws-paneError{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
+.nws-paneAction{align-self:flex-start}
 `
 
-    // ---- small helpers -------------------------------------------------
+    // ---- PURE ---------------------------------------------------------
 
-    /** RFC4122-ish id: crypto.randomUUID when available, Math.random fallback. */
-    function uid() {
-      if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
-      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = (Math.random() * 16) | 0
-        const v = c === 'x' ? r : (r & 0x3) | 0x8
-        return v.toString(16)
-      })
+    /** Fold any thrown value into one operator-facing message (keeps Host codes). */
+    function msg(e) {
+      if (e && typeof e === 'object') {
+        const rpc = e.rpcError
+        if (rpc && typeof rpc === 'object') {
+          const code = typeof rpc.code === 'string' ? rpc.code : ''
+          const text = typeof rpc.message === 'string' ? rpc.message : ''
+          if (text !== '') return code === '' ? text : code + ': ' + text
+        }
+        if (typeof e.message === 'string' && e.message !== '') return e.message
+      }
+      return String(e)
     }
 
     /** Expand a leading `~` against the host home; non-`~` paths pass through. */
@@ -166,18 +154,7 @@ window.__ModuleLoader__.load({
       return path
     }
 
-    /** Fold any thrown value into one operator-facing message (keeps Host codes). */
-    function msg(e) {
-      if (e && typeof e === 'object') {
-        if (e.error && typeof e.error.message === 'string' && e.error.message) {
-          return (e.error.code ? e.error.code + ': ' : '') + e.error.message
-        }
-        if (typeof e.message === 'string' && e.message) return e.message
-      }
-      return String(e)
-    }
-
-    /** The session the main panel currently shows (`retainedBy.mainView`, same read the sidebar uses). */
+    /** The session the main panel currently shows (`retainedBy.mainView`, the sidebar's own read). */
     function mainSessionId(list) {
       for (const id of list.ids) {
         const summary = list.byId[id]
@@ -186,119 +163,260 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
+    /** Zero-pad one date/time component. */
+    const pad2 = (n) => String(n).padStart(2, '0')
+
+    /** `<root>/<date>/<time>`: the per-session task folder for right now. */
+    function taskCwdFor(root) {
+      const sep = root.includes('\\') ? '\\' : '/'
+      const now = new Date()
+      const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`
+      const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`
+      return `${root}${sep}${date}${sep}${time}`
+    }
+
+    /** Path form a lexical comparison can use: slashes, no trailing slash, case-folded. */
+    const normalizePath = (path) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+    /** Whether one cwd is exactly a task folder under `root`. */
+    function isTaskCwd(cwd, root) {
+      if (typeof cwd !== 'string' || cwd === '' || root === undefined) return false
+      const base = normalizePath(root)
+      const target = normalizePath(cwd)
+      if (base === '' || !target.startsWith(base + '/')) return false
+      return TASK_DIR_PATTERN.test(target.slice(base.length + 1))
+    }
+
+    /** The served settings namespace belonging to this plugin, preferring its own hint. */
+    function pickServed(served) {
+      for (const name of served) if (name.includes(NAMESPACE_HINT)) return name
+      for (const id of ENTRY_IDS) if (served.has(id)) return id
+      return undefined
+    }
+
+    // ---- SESSION ------------------------------------------------------
     /**
-     * One 16-unit glyph at the requested pixel size.
-     *
-     * The stroke width is compensated for the scale: the artwork is drawn on a
-     * 16-unit grid, so rendering it larger would otherwise thicken every line by
-     * the same factor and make the glyph read heavier than the icons beside it.
-     * @param children Glyph nodes.
-     * @param size Rendered square size in pixels.
-     * @param stroke Optional explicit stroke width; defaults to the scale-corrected 1.3.
-     * @returns The inline SVG element.
+     * Create the ungrouped session, wait for the Host's mount, open it.
+     * @param deps Context, translator, and the task-folder setting reader.
+     * @returns the chip action, the page-local mount ledger, and the home reader.
      */
-    const svg = (children, size, stroke) => h('svg', {
+    function createSessionFlow({ ctx, t, readDefaultDir }) {
+      /** Mounts this page created or re-adopted, keyed by session id. */
+      const tracked = new Map()
+
+      /** Cached host home: `$host` facts are fixed for the page load. */
+      let home
+      let homeKnown = false
+      const hostHome = () => {
+        if (!homeKnown) {
+          homeKnown = true
+          try { home = ctx.remote && ctx.remote.$host ? ctx.remote.$host.home : undefined } catch { home = undefined }
+        }
+        return home
+      }
+
+      /**
+       * The task-folder root this half and the Host share: the configured
+       * setting with `~` expanded.
+       * @returns the absolute root, or undefined when it cannot be resolved.
+       */
+      const taskRoot = () => {
+        const raw = readDefaultDir()
+        const expanded = expandHome(raw, hostHome())
+        // expandHome leaves an unfoldable `~` path untouched.
+        if (expanded === raw && (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\'))) return undefined
+        const root = expanded.replace(/[\\/]+$/, '')
+        return root === '' ? undefined : root
+      }
+
+      /** Whether some workspace currently holds this session. */
+      const isMounted = (sessionId) => ctx.workspaces.list.getSnapshot().items.some((item) => item.sessionIds.includes(sessionId))
+
+      /** Whether a task folder is already used by another session or mount. */
+      const cwdInUse = (cwd) => {
+        const key = normalizePath(cwd)
+        const list = ctx.sessions.list.getSnapshot()
+        for (const id of list.ids) {
+          const row = list.byId[id]
+          if (typeof row?.cwd === 'string' && row.cwd !== '' && normalizePath(row.cwd) === key) return true
+        }
+        return ctx.workspaces.list.getSnapshot().items.some((item) => normalizePath(item.path) === key)
+      }
+
+      /** Resolve on the next local wall-clock second, so two clicks never share one folder. */
+      const nextSecond = () => new Promise((resolve) => {
+        setTimeout(resolve, 1000 - (Date.now() % 1000))
+      })
+
+      /**
+       * Resolve once the Host's mount holds this session, or after a short wait.
+       * A timed-out wait still opens, so a missing mount degrades to the shipped
+       * "choose a workspace" state instead of a silent no-op.
+       * @param sessionId Session whose mount the Host announces.
+       */
+      const waitForWorkspaceMount = (sessionId) => new Promise((resolve) => {
+        let done = false
+        let stop
+        let timer
+        const finish = () => {
+          if (done) return
+          done = true
+          if (stop !== undefined) stop()
+          if (timer !== undefined) clearTimeout(timer)
+          resolve()
+        }
+        timer = setTimeout(finish, MOUNT_WAIT_TIMEOUT_MS)
+        if (isMounted(sessionId)) {
+          finish()
+          return
+        }
+        stop = ctx.workspaces.list.subscribe(() => { if (isMounted(sessionId)) finish() })
+        // A store may publish synchronously on subscribe; the flag keeps that path safe.
+        if (done) stop()
+      })
+
+      /** Create a session in a fresh task folder, track its mount, then open it. */
+      const createUngrouped = async () => {
+        const root = taskRoot()
+        if (root === undefined) throw new Error(t('chip.noHome'))
+        let cwd = taskCwdFor(root)
+        // Two clicks inside one second would share one folder and, through it, one
+        // temporary mount; wait for the next second rather than collide.
+        for (let attempt = 0; attempt < 3 && cwdInUse(cwd); attempt += 1) {
+          await nextSecond()
+          cwd = taskCwdFor(root)
+        }
+        const sessionId = await ctx.sessions.create({ cwd })
+        // Tracked before the mount is awaited: the Host publishes the mount
+        // during the create call, and the sweep must already own the row.
+        tracked.set(sessionId, { at: Date.now(), adopted: false })
+        await waitForWorkspaceMount(sessionId)
+        ctx.uiWorkspace.openSession(sessionId)
+        return sessionId
+      }
+
+      /**
+       * Chip action: reuse the current scratch session, else create one. Reuse
+       * covers a session created earlier on this page and — after a hard refresh,
+       * when the ledger is empty — a task-folder blank session the Host already
+       * mounted; the chip therefore never opens an inert session with no mount.
+       */
+      const start = async () => {
+        const list = ctx.sessions.list.getSnapshot()
+        const current = mainSessionId(list)
+        const summary = current === undefined ? undefined : list.byId[current]
+        if (current !== undefined && summary?.blank === true) {
+          if (tracked.has(current)) {
+            ctx.uiWorkspace.openSession(current)
+            return current
+          }
+          if (isTaskCwd(summary.cwd, taskRoot()) && isMounted(current)) {
+            tracked.set(current, { at: Date.now(), adopted: false })
+            ctx.uiWorkspace.openSession(current)
+            return current
+          }
+        }
+        return await createUngrouped()
+      }
+
+      return { tracked, start, hostHome }
+    }
+
+    // ---- MOUNT-RETIRE -------------------------------------------------
+    /**
+     * Abandon the mounts this page opened and never used. Ordinary retirement
+     * belongs to the Host (first user message) and empty folders are reclaimed
+     * by its startup pass.
+     * @param deps Context and the page-local mount ledger owned by the session flow.
+     * @returns the reconciler driven by the session and workspace stores.
+     */
+    function createMountRetire({ ctx, tracked }) {
+      /** Forget one ledger row and drop the workspace that still holds it. */
+      const retire = (sessionId) => {
+        tracked.delete(sessionId)
+        const workspace = ctx.workspaces.list.getSnapshot().items.find((item) => item.sessionIds.includes(sessionId))
+        if (workspace === undefined) return
+        void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* already removed by the Host or another page */ })
+      }
+
+      /**
+       * The current session marks its row adopted; a non-current row is retired
+       * once it left the creation window and either turned non-blank (the Host's
+       * retirement did not run) or was adopted, or grew older than the minimum.
+       */
+      const sweep = () => {
+        if (tracked.size === 0) return
+        const sessions = ctx.sessions.list.getSnapshot()
+        const current = mainSessionId(sessions)
+        const now = Date.now()
+        for (const [sessionId, state] of [...tracked]) {
+          if (sessionId === current) {
+            state.adopted = true
+            continue
+          }
+          const age = now - state.at
+          if (age < ADOPTION_WINDOW_MS) continue
+          const blank = sessions.byId[sessionId]?.blank === true
+          if (blank && !state.adopted && age < MOUNT_MIN_AGE_MS) continue
+          retire(sessionId)
+        }
+      }
+
+      return { sweep }
+    }
+
+    // ---- UI -----------------------------------------------------------
+
+    /** Folder-with-a-slash glyph on a 16-unit grid, stroke-compensated for the rendered size. */
+    const icoNoWorkspace = (size = 16, stroke) => h('svg', {
       viewBox: '0 0 16 16', width: size, height: size, fill: 'none', stroke: 'currentColor',
       strokeWidth: stroke ?? (1.3 * 16) / size, strokeLinecap: 'round', strokeLinejoin: 'round',
       'aria-hidden': true, focusable: false, className: 'nws-chipIcon',
-    }, children)
-    const icoNoWorkspace = (size = 16, stroke) => svg([
+    }, [
       h('path', { d: 'M1.5 4.4c0-.66.54-1.2 1.2-1.2h3l1.4 1.5h6.2c.66 0 1.2.54 1.2 1.2v6.5c0 .66-.54 1.2-1.2 1.2H2.7c-.66 0-1.2-.54-1.2-1.2V4.4Z' }),
       h('path', { d: 'M3 13 13 3' }),
-    ], size, stroke)
+    ])
 
-    // ---- 1. hero entry: start a session outside every workspace --------
-
-    /** The chip itself, shared by both seats; no host component is replaced. */
-    function UngroupedChip({ start, t }) {
+    /** Busy and error state for one `start()` trigger. */
+    function useStart(start) {
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
-      const onClick = async () => {
+      const run = async () => {
         if (busy) return
         setBusy(true)
         setError(null)
         try { await start() } catch (e) { setError(msg(e)) } finally { setBusy(false) }
       }
+      return { busy, error, run }
+    }
+
+    /** The hero-row chip; it starts a session outside every workspace. */
+    function UngroupedChip({ start, t }) {
+      const { busy, error, run } = useStart(start)
       return h('button', {
         type: 'button', className: 'nws-chip', disabled: busy, title: t('chip.title'),
-        onClick: () => { void onClick() },
+        onClick: () => { void run() },
       },
         icoNoWorkspace(),
         h('span', { className: 'nws-chipLabel' }, busy ? t('chip.busy') : t('chip.label')),
         error !== null && h('span', { className: 'nws-chipError', role: 'alert' }, t('chip.error', { message: error })))
     }
 
-    /**
-     * Seat for the settled hero row (`conversation.hero.options`), which newer
-     * harness builds declare next to the workspace picker. Absent from the
-     * installed build, so its registration silently never fires there.
-     */
-    function HeroChip({ start, t }) {
-      return h(UngroupedChip, { start, t })
-    }
-
-    /**
-     * Glyph for the guide capsule; the registry wants a component, not an element.
-     * @param props - `size` in pixels, as the guide's icon contract passes it.
-     * @returns the element to draw.
-     */
-    /**
-     * Glyph for the guide capsule; the registry wants a component, not an element.
-     * The registry's own size hint is ignored: this glyph has one good size, and
-     * the 26px box the guide draws it in centers whatever it returns.
-     * @returns the element to draw.
-     */
+    /** Glyph for the guide capsules; the registry wants a component, not an element. */
     function GuideIcon() {
       return icoNoWorkspace(20)
     }
 
-    /**
-     * Seat that exists in every build: the composer stack's full-width dock,
-     * which sits between the hero row and the input card. It renders for every
-     * Session, so it shows the entry only where the shipped composer would be
-     * inert — a blank Session that is not already ours. Reads the standard
-     * `useSessions` seat rather than owner props, which the installed build's
-     * dock registration need not carry.
-     */
-    function DockChip({ start, seatTaken, useSessions, t }) {
-      const list = useSessions((s) => s)
-      const current = mainSessionId(list)
-      const summary = current === undefined ? undefined : list.byId[current]
-      // Shown on every blank Session, this plugin's own scratch session included:
-      // hiding there only saved a redundant chip and turned one stale bit of state
-      // into a missing entry point. `seatTaken` still keeps a newer harness's hero
-      // seat from showing both.
-      if (seatTaken() || summary === undefined || summary.blank !== true) return null
-      return h('div', { className: 'nws-dock' },
-        h('div', { className: 'nws-dockInner' }, h(UngroupedChip, { start, t })))
-    }
-
-    /**
-     * Card in the right sidebar's guide ("开始") page.
-     *
-     * The guide entry is a tab *type* seat: a registered type contributes its
-     * entry capsule and the shipped card would open a pane of that type. This
-     * plugin has no pane, so it registers the seat's own card and spends the
-     * click on the same action as the chip — create the session and open it in
-     * the main view. `title`/`description` come from the guide entry the tab
-     * registry carries, so the copy stays localized in one place.
-     */
+    /** The guide card: a capsule that spends its click on `start()` instead of opening the pane. */
     function GuideCard({ title, description, start, t }) {
-      const [busy, setBusy] = useState(false)
-      const [error, setError] = useState(null)
-      const onClick = async () => {
-        if (busy) return
-        setBusy(true)
-        setError(null)
-        try { await start() } catch (e) { setError(msg(e)) } finally { setBusy(false) }
-      }
+      const { busy, error, run } = useStart(start)
       return h('button', {
         type: 'button', className: 'nws-card', disabled: busy,
         // The guide only prints a description while it lists few entries, so the
         // hover hint keeps the copy available in a crowded one.
         title: description === undefined ? title : `${title} — ${description}`,
-        'data-sidebar-right-guide-entry': 'noworkspace',
-        onClick: () => { void onClick() },
+        'data-sidebar-right-guide-entry': SIDEBAR_KIND,
+        onClick: () => { void run() },
       },
         h('span', { className: 'nws-cardIcon', 'aria-hidden': 'true' }, icoNoWorkspace(20)),
         h('span', { className: 'nws-cardText' },
@@ -311,16 +429,25 @@ window.__ModuleLoader__.load({
             : description !== undefined && h('span', { className: 'nws-cardDesc' }, description)))
     }
 
-    // ---- 2. settings row ----------------------------------------------
+    /** The pane the guide type opens: the same action as the chip, with its own copy. */
+    function GuidePane({ start, t }) {
+      const { busy, error, run } = useStart(start)
+      return h('div', { className: 'nws-pane' },
+        h('div', { className: 'nws-paneTitle' }, t('card.title')),
+        h('div', { className: 'nws-paneDesc' }, t('card.description')),
+        error !== null && h('div', { className: 'nws-paneError', role: 'alert' }, t('chip.error', { message: error })),
+        h('button', {
+          type: 'button', className: 'nws-btn nws-paneAction', disabled: busy,
+          onClick: () => { void run() },
+        }, busy ? t('chip.busy') : t('chip.label')))
+    }
 
     /**
-     * Codex-style row: current folder + Change/Reset over the config form mirror.
-     *
-     * The buttons only stay disabled while a write is in flight, or when the Host
-     * reports the namespace as not exposed at all. Gating on `status === 'ready'`
-     * or `writable` looks stricter but leaves the row permanently inert whenever
-     * the mirror still reports `loading`, which is indistinguishable from a
-     * broken write and takes the operator's only recovery action away.
+     * One settings row: current folder plus Change/Reset over the config form
+     * mirror. The buttons only stay disabled while a write is in flight, or when
+     * the Host reports the namespace as not exposed at all — gating on
+     * `status === 'ready'` would leave the row permanently inert whenever the
+     * mirror still reports `loading`.
      */
     function DefaultDirRow({ useDirForm, change, reset, homeOf, t }) {
       const snap = useDirForm((s) => s)
@@ -356,8 +483,9 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'nws-btn nws-btnQuiet', disabled: busy || unavailable || !overridden, onClick: () => void run(reset) }, t('settings.reset'))))
     }
 
-    // ---- assembly -------------------------------------------------------
+    // ---- ASSEMBLY -----------------------------------------------------
 
+    /** @param ctx Client root context. */
     function apply(ctx) {
       const style = document.createElement('style')
       style.setAttribute('data-plugin', 'dsh-plugin-noworkspace-session')
@@ -368,229 +496,101 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'noworkspace-session: dictionaries')
       const t = ctx.locale.bind(NS)
 
-      const hostHome = () => {
-        try { return ctx.remote && ctx.remote.$host ? ctx.remote.$host.home : undefined } catch { return undefined }
-      }
-      /** Config-form service; captured from the optional declaration, so a profile without it stays usable. */
-      let configForms
       /**
-       * The settings namespace the Host actually serves for this plugin, read from
-       * the describe mirror: it is the loader *entry* id (`include:`-qualified),
-       * and a wrong guess answers `unavailable` forever.
+       * The settings namespace the Host serves this plugin under. The served set
+       * from `whileServed` is the fast path; otherwise the describe mirror is
+       * probed, because a guessed spelling answers `unavailable` forever. One memo
+       * serves both the settings row and the folder root sessions are created under.
        */
-      const resolveNamespace = () => {
+      let configForms
+      let servedNamespace
+      const formsOf = () => configForms ?? ctx.get('configForms')
+      const probeNamespace = () => {
         try {
-          const forms = configForms ?? ctx.get('configForms')
-          const served = (forms?.describe?.().getSnapshot()?.view?.namespaces ?? [])
+          const served = (formsOf()?.describe?.().getSnapshot()?.view?.namespaces ?? [])
             .map((view) => view.ns)
             .filter((name) => typeof name === 'string')
           return served.find((name) => name.includes(NAMESPACE_HINT))
             ?? ENTRY_IDS.find((id) => served.includes(id))
             ?? ENTRY_ID
-        } catch { return ENTRY_ID }
+        } catch {
+          return ENTRY_ID
+        }
+      }
+      const namespaceId = () => servedNamespace ?? probeNamespace()
+      const formFor = () => {
+        const forms = formsOf()
+        return forms === undefined ? undefined : forms.get(namespaceId())
       }
       const readDefaultDir = () => {
         try {
-          const forms = configForms ?? ctx.get('configForms')
-          const form = forms ? forms.get(resolveNamespace()) : undefined
-          const snap = form ? form.getSnapshot() : undefined
-          const v = snap && snap.value ? snap.value.defaultDir : undefined
-          if (typeof v === 'string' && v.trim() !== '') return v.trim()
+          const value = formFor()?.getSnapshot()?.value?.defaultDir
+          if (typeof value === 'string' && value.trim() !== '') return value.trim()
         } catch { /* form unavailable → schema default */ }
         return DEFAULT_DIR
       }
 
-      /** Create the session under `<defaultDir>\<date>\<time>`; Host mkdirs recursively. */
-      const createUngrouped = async () => {
-        const home = hostHome()
-        const raw = readDefaultDir()
-        if (raw.startsWith('~') && !home) throw new Error(t('chip.noHome'))
-        const base = expandHome(raw, home).replace(/[\\/]+$/, '')
-        const sep = base.includes('\\') ? '\\' : '/'
-        const now = new Date()
-        const pad = (n) => String(n).padStart(2, '0')
-        const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-        const time = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
-        const cwd = `${base}${sep}${date}${sep}${time}`
-        const sessionId = `${SESSION_ID_PREFIX}${uid()}`
-        // Tracked BEFORE the create call, and keyed on the id this half minted:
-        // the Host mounts the session *during* that call, so a sweep triggered by
-        // the resulting workspace change must already recognize the mount as ours.
-        tracked.set(sessionId, Date.now())
-        adopting.set(sessionId, Date.now() + ADOPTION_WINDOW_MS)
-        const created = await ctx.sessions.create({ cwd, sessionId })
-        await waitForWorkspaceMount(created, cwd)
-        ctx.uiWorkspace.openSession(created)
-        return created
-      }
-
-      /**
-       * Wait until the Host half mounted the session in its own workspace. The
-       * native composer is inert until then, so opening early would flash the
-       * "choose a workspace" bar. A timeout still opens the session.
-       */
-      const waitForWorkspaceMount = async (sessionId, path) => {
-        const mounted = () => ctx.workspaces.list.getSnapshot().items
-          .some((w) => w.path === path && w.sessionIds.includes(sessionId))
-        const deadline = Date.now() + 4000
-        while (Date.now() < deadline) {
-          if (mounted()) return
-          await new Promise((resolve) => { setTimeout(resolve, 50) })
-        }
-      }
-
-      /**
-       * Chip action: reuse the current blank scratch session, else create one —
-       * `createUngrouped` opens it once the Host has mounted it.
-       */
-      const start = async () => {
-        const list = ctx.sessions.list.getSnapshot()
-        const current = mainSessionId(list)
-        if (typeof current === 'string' && list.byId[current]?.blank === true && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))) {
-          ctx.uiWorkspace.openSession(current)
-          return
-        }
-        await createUngrouped()
-      }
-
-      /**
-       * Retire a mount that no longer needs to exist: its blank session was
-       * abandoned without a first message (the sidebar hides blank rows, so the
-       * group would otherwise linger as an empty workspace), or the Host half's
-       * first-message retirement did not run.
-       *
-       * Adoption is what makes this prompt without racing the Host: a mount is
-       * held while its session is the current one and, before that, for the
-       * moment between `sessions.create` and `openSession`. The instant the
-       * session becomes current it leaves both windows, so moving elsewhere
-       * retires the group on the spot. A mount that never becomes current is
-       * held for `MOUNT_MIN_AGE_MS` in case adoption is merely slow.
-       */
-      /**
-       * Scratch sessions this page created, keyed by the id it minted. A mount is
-       * only ever retired when it belongs to one of these: anything else (a mount
-       * from another page load, a previous process, or a build that registered
-       * after the Host had already mounted) is left for the Host's startup sweep
-       * rather than deleted on a guess.
-       */
-      const tracked = new Map()
-      /**
-       * Tracked sessions `openSession` has not adopted yet: the only window where
-       * a mount must survive while it is neither current nor watched. Cleared the
-       * moment the session turns current, with a time fallback.
-       */
-      const adopting = new Map()
-      /** Scratch sessions that have been the current Session at least once. */
-      const adopted = new Set()
-      /** Milliseconds since one Session row's last durable activity. */
-      const ageOf = (summary) => (typeof summary?.updatedAt === 'number' ? Date.now() - summary.updatedAt : 0)
-      const sweep = () => {
-        const sessions = ctx.sessions.list.getSnapshot()
-        const current = mainSessionId(sessions)
-        // Before a current Session exists the app is still restoring, and a
-        // mount deleted here could be the blank Session that restore needs.
-        if (current === undefined) return
-        const currentRow = sessions.byId[current]
-        if (typeof current === 'string' && currentRow?.blank === true && (tracked.has(current) || current.startsWith(LEGACY_ID_PREFIX))) {
-          // Adoption complete: from here the session is an ordinary page, and
-          // leaving it must retire the mount on the spot.
-          adopted.add(current)
-          adopting.delete(current)
-        }
-        const now = Date.now()
-        for (const [id, deadline] of adopting) if (deadline <= now) adopting.delete(id)
-        for (const workspace of ctx.workspaces.list.getSnapshot().items) {
-          if (typeof workspace.title !== 'string' || !workspace.title.startsWith(MOUNT_TITLE_PREFIX)) continue
-          const owned = workspace.sessionIds.find((id) => tracked.has(id))
-          if (owned === undefined) continue
-          // Still inside the creation → openSession window.
-          if (adopting.has(owned)) continue
-          // The page the operator is looking at right now.
-          if (workspace.sessionIds.includes(current)) continue
-          // Never adopted and its session is still young: hold it, in case
-          // adoption is slow or the page was reloaded mid-adoption.
-          if (!adopted.has(owned) && ageOf(sessions.byId[owned]) < MOUNT_MIN_AGE_MS) continue
-          void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* retried on the next pass */ })
-        }
-      }
-
+      const session = createSessionFlow({ ctx, t, readDefaultDir })
+      const { sweep } = createMountRetire({ ctx, tracked: session.tracked })
       ctx.effect(() => {
-        const stop = ctx.sessions.list.subscribe(sweep)
+        const stopSessions = ctx.sessions.list.subscribe(sweep)
         const stopWorkspaces = ctx.workspaces.list.subscribe(sweep)
-        // The subscriptions fire on every session/workspace change, which is what
-        // makes moving away retire the group on the spot; the timer only exists so
-        // a missed change still converges within a few seconds, and so a mount held
-        // by the age guard above is retired once it grows old enough.
+        // Subscriptions retire a mount the moment the operator moves away; the
+        // timer only makes a missed change and an age-guarded row converge.
         const timer = setInterval(sweep, MOUNT_SWEEP_INTERVAL_MS)
-        sweep()
-        return () => { stop(); stopWorkspaces(); clearInterval(timer) }
+        return () => { stopSessions(); stopWorkspaces(); clearInterval(timer) }
       }, 'noworkspace-session: abandoned-mount sweep')
 
-      // 1) the entry itself, in whichever additive seat this harness declares.
-      //    Both registrations are inert when their slot is absent: `slots.inject`
-      //    only installs while the owning declaration is live, so the newer
-      //    `conversation.hero.options` seat stays empty on today's build and the
-      //    dock takes over. `heroSeatLive` keeps a future build from showing both.
-      let heroSeatLive = false
-      ctx.effect(() => ctx.slots.inject('conversation.hero.options', () => {
-        heroSeatLive = true
-        return ctx.slots.register({
-          name: 'conversation.hero.options',
-          id: 'noworkspace-ungrouped',
-          order: 10,
-          locale: NS,
-          inject: () => ({ start }),
-        }, HeroChip)
-      }), 'noworkspace-session: hero options chip')
-
-      ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-        name: 'conversation.input.dock',
+      // 1) the hero row's additive options seat, after the workspace and preset
+      //    controls.
+      ctx.effect(() => ctx.slots.inject('conversation.hero.options', () => ctx.slots.register({
+        name: 'conversation.hero.options',
         id: 'noworkspace-ungrouped',
         order: 10,
         locale: NS,
-        inject: () => ({ start, seatTaken: () => heroSeatLive }),
-      }, DockChip)), 'noworkspace-session: composer dock chip')
+        inject: () => ({ start: session.start }),
+      }, UngroupedChip)), 'noworkspace-session: hero options chip')
 
       // 2) settings row — only while the Host actually serves our namespace.
-      //    The namespace is the loader *entry* id, which carries the `include:`
-      //    qualifier (`include:noworkspace-session`), so it is read from the
-      //    describe mirror instead of hardcoded: a wrong id reports `unavailable`
-      //    forever and leaves the row permanently unwritable.
       ctx.inject(['configForms'], (child) => {
-        const forms = child.configForms
-        configForms = forms
-        child.effect(() => forms.whileServed(ENTRY_IDS, (served) => {
-          const namespace = [...served].find((name) => name.includes(NAMESPACE_HINT)) ?? resolveNamespace()
-          const form = forms.get(namespace)
-          const change = async () => {
-            const path = await ctx.uiWorkspace.pickDirectory()
-            if (!path) return
-            const ok = await form.set('defaultDir', path)
-            if (!ok) throw new Error(t('settings.writeFailed'))
+        configForms = child.configForms
+        child.effect(() => {
+          const dispose = child.configForms.whileServed(ENTRY_IDS, (served) => {
+            const namespace = pickServed(served) ?? probeNamespace()
+            servedNamespace = namespace
+            const form = child.configForms.get(namespace)
+            const change = async () => {
+              const path = await ctx.uiWorkspace.pickDirectory()
+              if (!path) return
+              const ok = await form.set('defaultDir', path)
+              if (!ok) throw new Error(t('settings.writeFailed'))
+            }
+            const reset = async () => {
+              const ok = await form.unset('defaultDir')
+              if (!ok) throw new Error(t('settings.writeFailed'))
+            }
+            return child.slots.inject('settings.general.item', () => child.slots.register({
+              name: 'settings.general.item',
+              id: 'noworkspace-default-dir',
+              order: 50,
+              locale: NS,
+              inject: () => ({ hooks: { dirForm: form }, change, reset, homeOf: session.hostHome }),
+            }, DefaultDirRow))
+          })
+          return () => {
+            servedNamespace = undefined
+            if (typeof dispose === 'function') dispose()
           }
-          const reset = async () => {
-            const ok = await form.unset('defaultDir')
-            if (!ok) throw new Error(t('settings.writeFailed'))
-          }
-          return child.slots.inject('settings.general.item', () => child.slots.register({
-            name: 'settings.general.item',
-            id: 'noworkspace-default-dir',
-            order: 50,
-            locale: NS,
-            inject: () => ({ hooks: { dirForm: form }, change, reset, homeOf: hostHome }),
-          }, DefaultDirRow))
-        }), 'noworkspace-session: settings row')
+        }, 'noworkspace-session: settings row')
       })
 
-      // 3) right sidebar guide card — the tab *type* carries the capsule the
-      //    guide page renders, and the seat's own card spends the click on
-      //    `start()`. The type is registered without a pane body on purpose: a
-      //    session belongs to the conversation surface, which the right column
-      //    has no seat for, so opening a pane of this kind is not a path.
+      // 3) the right sidebar guide: the tab type carries the capsule, the keyed
+      //    card seat spends the click on `start()`, and the pane body makes the
+      //    type openable (the guide's "more" list can reach it).
       ctx.inject(['sidebarRightTabs'], (child) => {
         child.effect(() => child.sidebarRightTabs.register({
           id: SIDEBAR_TYPE_ID,
-          kind: 'noworkspace',
+          kind: SIDEBAR_KIND,
           multiple: false,
           title: () => t('card.title'),
           guide: [{
@@ -602,9 +602,17 @@ window.__ModuleLoader__.load({
           }],
         }), 'noworkspace-session: sidebar tab type')
         child.effect(() => child.slots.inject('sidebar.right.tab.guide.entry', () => child.slots.register({
-          name: 'sidebar.right.tab.guide.entry', key: SIDEBAR_TYPE_ID, locale: NS,
-          inject: () => ({ start }),
+          name: 'sidebar.right.tab.guide.entry',
+          key: SIDEBAR_TYPE_ID,
+          locale: NS,
+          inject: () => ({ start: session.start }),
         }, GuideCard)), 'noworkspace-session: sidebar guide card')
+        child.effect(() => child.slots.inject('sidebar.right.pane.tab', () => child.slots.register({
+          name: 'sidebar.right.pane.tab',
+          key: SIDEBAR_TYPE_ID,
+          locale: NS,
+          inject: () => ({ start: session.start }),
+        }, GuidePane)), 'noworkspace-session: sidebar guide pane')
       })
     }
 
