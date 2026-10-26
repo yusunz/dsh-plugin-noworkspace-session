@@ -33,6 +33,7 @@ expect('客户端产出时间目录用零填充的本地时分秒', client.inclu
 
 // ---- 会话 id 与命令契约 ----
 expect('客户端不再自铸 session id', /sessions\.create\(\{\s*cwd\s*\}\)/.test(client) && !client.includes('SESSION_ID_PREFIX'))
+expect('客户端在自身空白 scratch 会话上隐藏入口', client.includes('isOwnScratch'))
 expect('客户端放弃时走 workspaces.delete', client.includes('ctx.workspaces.delete('))
 expect('两端都不再依赖标题前缀做运行时所有权判断',
   !client.includes('MOUNT_TITLE_PREFIX') && !index.includes('MOUNT_TITLE_PREFIX'))

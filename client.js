@@ -357,7 +357,16 @@ window.__ModuleLoader__.load({
         return await createUngrouped()
       }
 
-      return { tracked, start, hostHome, adoptCurrent }
+      /**
+       * Whether a session is one of this feature's scratch sessions: blank and
+       * sitting in a task folder. The chip hides on it — the entry point already
+       * did its job, and clicking again would only reopen the same page.
+       * @param summary Session list row.
+       */
+      const isOwnScratch = (summary) => summary?.blank === true
+        && isTaskCwd(summary.cwd, taskRoot(), foldCase())
+
+      return { tracked, start, hostHome, adoptCurrent, isOwnScratch }
     }
 
     // ---- MOUNT-RETIRE -------------------------------------------------
@@ -437,9 +446,19 @@ window.__ModuleLoader__.load({
       return { busy, error, run }
     }
 
-    /** The hero-row chip; it starts a session outside every workspace. */
-    function UngroupedChip({ start, t }) {
+    /**
+     * The hero-row chip; it starts a session outside every workspace. It hides on
+     * this feature's own blank scratch session, where the entry has already done
+     * its job (`isOwnScratch`); the guide card stays available as the entry point
+     * when a fresh scratch session is wanted.
+     */
+    function UngroupedChip({ start, isOwnScratch, useSessions, t }) {
+      const summary = useSessions((snapshot) => {
+        const current = mainSessionId(snapshot)
+        return current === undefined ? undefined : snapshot.byId[current]
+      })
       const { busy, error, run } = useStart(start)
+      if (isOwnScratch?.(summary)) return null
       return h('button', {
         type: 'button', className: 'nws-chip', disabled: busy, title: t('chip.title'),
         onClick: () => { void run() },
@@ -595,7 +614,7 @@ window.__ModuleLoader__.load({
         id: 'noworkspace-ungrouped',
         order: 10,
         locale: NS,
-        inject: () => ({ start: session.start }),
+        inject: () => ({ start: session.start, isOwnScratch: session.isOwnScratch }),
       }, UngroupedChip)), 'noworkspace-session: hero options chip')
 
       // 2) settings row — only while the Host actually serves our namespace.

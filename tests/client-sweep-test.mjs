@@ -216,5 +216,24 @@ const taskCwd = 'C:\\tasks\\2026-10-27\\09-00-00'
   for (const dispose of harness.effects) dispose()
 }
 
+// ---- 5) chip 在自己的空白 scratch 会话上隐藏，在普通空白会话上仍显示 ----
+{
+  const harness = createContext()
+  const client = loadClient()
+  client.apply(harness.ctx)
+  const chip = harness.registrations.find((entry) => entry.name === 'conversation.hero.options')
+  const faces = chip.inject()
+  const render = (row) => chip.component({
+    ...faces,
+    useSessions: (selector) => selector({ ids: ['session-x'], byId: { 'session-x': { retainedBy: { mainView: 1 }, ...row } } }),
+    t: (key) => key,
+  })
+  expect('自己的空白 scratch 会话上隐藏 chip', render({ id: 'session-x', blank: true, cwd: taskCwd }) === null)
+  expect('普通空白未分组会话仍显示 chip', render({ id: 'session-x', blank: true }) !== null)
+  expect('非空白会话不按 scratch 隐藏（由 hero 座位自身不渲染）',
+    render({ id: 'session-x', blank: false, cwd: taskCwd }) !== null)
+  for (const dispose of harness.effects) dispose()
+}
+
 console.log(failures.length === 0 ? '全部通过' : `未通过：\n - ${failures.join('\n - ')}`)
 process.exit(failures.length === 0 ? 0 : 1)
