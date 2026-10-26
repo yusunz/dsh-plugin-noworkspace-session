@@ -45,7 +45,7 @@ dsh plugin --profile desktop add dsh-plugin-noworkspace-session
 dsh plugin --profile desktop add github:yusunz/dsh-plugin-noworkspace-session
 
 # 本地 tarball
-dsh plugin --profile desktop add /absolute/path/to/dsh-plugin-noworkspace-session-0.3.2.tgz
+dsh plugin --profile desktop add /absolute/path/to/dsh-plugin-noworkspace-session-0.3.3.tgz
 ```
 
 安装后**重启 DSH**（宿主半代码只在进程启动时加载），随后**硬刷新页面**（Ctrl+Shift+R）以确保取到新的客户端 bundle。
