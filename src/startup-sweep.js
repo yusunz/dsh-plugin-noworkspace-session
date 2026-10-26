@@ -14,7 +14,7 @@ import { canonicalPath, canonicalTaskRoot, sweepEmptyTaskFolders } from './task-
 
 /**
  * Create the one-shot startup maintenance.
- * @param ctx - Plugin context; the live `sessions` service is optional.
+ * @param ctx - Plugin context; the `sessions` and `sessionPersistence` services are optional.
  * @param readDir - Resolves the configured task-folder path at run time.
  * @param ledger - Mount ledger, which owns leftover-mount retirement.
  * @param report - Operator-facing diagnostic sink.
@@ -36,18 +36,29 @@ export function createStartupMaintenance({
   let settleTimer
   let fallbackTimer
 
-  /** Canonical cwds of the live sessions whose folders must survive. */
-  const liveCwds = async () => {
-    const live = new Set()
+  const addCwd = async (keep, cwd) => {
+    if (typeof cwd === 'string' && cwd !== '') keep.add(await canonicalPath(cwd))
+  }
+
+  /**
+   * Canonical cwds whose folders must survive: live sessions plus every stored
+   * session. Stored sessions matter because resume does not recreate a cwd, so a
+   * persisted session whose folder was swept would later fail its tool calls.
+   */
+  const keepCwds = async () => {
+    const keep = new Set()
     try {
-      for (const session of ctx.get('sessions')?.list?.() ?? []) {
-        const cwd = session?.header?.cwd
-        if (typeof cwd === 'string' && cwd !== '') live.add(await canonicalPath(cwd))
-      }
+      for (const session of ctx.get('sessions')?.list?.() ?? []) await addCwd(keep, session?.header?.cwd)
     } catch (error) {
       report(`could not read the live session list: ${String(error)}`)
     }
-    return live
+    try {
+      const persistence = ctx.get('sessionPersistence')
+      for (const record of await persistence?.list?.() ?? []) await addCwd(keep, record?.header?.cwd)
+    } catch (error) {
+      report(`could not read the persisted session list: ${String(error)}`)
+    }
+    return keep
   }
 
   const run = async () => {
@@ -58,9 +69,10 @@ export function createStartupMaintenance({
     // rejection here exits the desktop process, so every failure stays local.
     try {
       const root = await canonicalTaskRoot(readDir())
-      if (root === undefined) return
+      if (disposed || root === undefined) return
       await ledger.retireLeftovers(root)
-      await sweepEmptyTaskFolders(root, await liveCwds())
+      if (disposed) return
+      await sweepEmptyTaskFolders(root, await keepCwds())
     } catch (error) {
       report(`startup maintenance skipped: ${String(error)}`)
     }

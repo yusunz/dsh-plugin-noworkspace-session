@@ -1,8 +1,3 @@
-/**
- * 端到端冒烟（v0.3）：用带服务守卫的 mock ctx 调真实 apply()，验证
- *   挂载（空白 + 任务目录形状）→ 首条消息卸载；subagent/非空白不挂载；
- *   启动期空目录回收（2s settle）与有内容/在用目录保留；不产生未捕获拒绝。
- */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -15,7 +10,8 @@ rmSync(base, { recursive: true, force: true })
 const abandoned = join(base, '2026-10-27', '09-00-00')
 const live = join(base, '2026-10-27', '09-00-01')
 const nonempty = join(base, '2026-10-27', '09-00-02')
-for (const dir of [abandoned, live, nonempty]) mkdirSync(dir, { recursive: true })
+const persisted = join(base, '2026-10-27', '09-00-04')
+for (const dir of [abandoned, live, nonempty, persisted]) mkdirSync(dir, { recursive: true })
 writeFileSync(join(nonempty, 'keep.txt'), 'x')
 
 const workspaces = []
@@ -54,6 +50,7 @@ const allowed = {
   get: (key) => {
     if (key === 'sessions') return { list: () => [{ header: { cwd: live } }] }
     if (key === 'workspaceRegistry') return registry
+    if (key === 'sessionPersistence') return { list: async () => [{ header: { cwd: persisted } }] }
     return undefined
   },
   logger: { warn: (...args) => console.log('[warn]', ...args) },
@@ -67,7 +64,6 @@ const ctx = new Proxy(allowed, {
 })
 
 const { apply } = await import(new URL('../index.js', import.meta.url).href)
-// 走 Volatile 引用路径（真实 Loader 交给 apply 的就是这种形状）
 apply(ctx, { defaultDir: { get: () => base } })
 console.log('apply 返回，未抛异常')
 
@@ -94,18 +90,21 @@ activity?.('session-a')
 await wait(80)
 expect('首条消息后挂载被卸载', workspaceOf('session-a') === undefined)
 
-// 再挂一个，然后用 removed 事件放掉账本项：不应抛错
+// removed：会话被 dispose 时应卸挂载而不是留下空分组
 const third = join(base, '2026-10-27', '09-00-03')
 mkdirSync(third, { recursive: true })
 announce?.({ sessionId: 'session-b', blank: true, cwd: third })
 await wait(80)
 expect('第二个会话也被挂载', workspaceOf('session-b') !== undefined)
 removed?.('session-b')
+await wait(80)
+expect('会话被 dispose 后挂载被卸载', workspaceOf('session-b') === undefined)
 
 await wait(2300) // 越过 2s settle，触发启动期维护
 expect('空任务目录在启动维护中被回收', !existsSync(abandoned))
 expect('在用的任务目录保留', existsSync(live))
 expect('有内容的任务目录保留', existsSync(nonempty) && existsSync(join(nonempty, 'keep.txt')))
+expect('有持久记录的任务目录也保留', existsSync(persisted))
 expect('日期目录仍含在用/有内容子目录', existsSync(join(base, '2026-10-27')))
 
 for (const dispose of disposers) dispose()

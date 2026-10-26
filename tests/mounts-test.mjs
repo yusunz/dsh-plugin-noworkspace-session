@@ -95,7 +95,7 @@ expect('失败不写入账本', flakyLedger.handles('session-d') === false)
 expect('重试成功', await flakyLedger.mount('session-d', cwd('2026-10-27', '10-00-03')) === true)
 expect('重试后持有', flakyLedger.handles('session-d') === true)
 
-// 同一会话的两次公告可能并行到达：pending 守卫只允许一次挂载
+// 同一会话的两次公告可能并行到达：inflight 让两次调用共享同一次挂载
 const slowRegistry = makeRegistry()
 const baseCreate = slowRegistry.create
 slowRegistry.create = async (path, title) => { await wait(20); return await baseCreate(path, title) }
@@ -104,8 +104,39 @@ const [firstAttempt, secondAttempt] = await Promise.all([
   slowLedger.mount('session-concurrent', cwd('2026-10-27', '10-00-05')),
   slowLedger.mount('session-concurrent', cwd('2026-10-27', '10-00-05')),
 ])
-expect('并发公告只发起一次挂载', [firstAttempt, secondAttempt].filter(Boolean).length === 1)
+expect('并发公告共享同一次挂载结果', firstAttempt === true && secondAttempt === true)
 expect('并发后只建一个工作区', slowRegistry.workspaces.length === 1)
+expect('并发后只 attach 一次', slowRegistry.workspaces[0].sessionIds.length === 1)
+
+// 不同会话落在同一 cwd：cwd claim 只允许一个挂载，避免共享挂载被首条消息连带删除
+const claimRegistry = makeRegistry()
+const claimCreate = claimRegistry.create
+claimRegistry.create = async (path, title) => { await wait(20); return await claimCreate(path, title) }
+const claimLedger = createMountLedger({ registryOf: () => claimRegistry, report, startedAt })
+const sameCwd = cwd('2026-10-27', '10-00-06')
+const [claimedFirst, claimedSecond] = await Promise.all([
+  claimLedger.mount('session-first', sameCwd),
+  claimLedger.mount('session-second', sameCwd),
+])
+expect('同 cwd 的不同会话只有一个挂载成功', [claimedFirst, claimedSecond].filter(Boolean).length === 1)
+expect('同 cwd 只建一个工作区且只有一个成员', claimRegistry.workspaces.length === 1
+  && claimRegistry.workspaces[0].sessionIds.length === 1)
+
+// 卸载失败时保留账本，下一次事件可重试
+const flakyDelete = makeRegistry()
+const flakyDeleteLedger = createMountLedger({ registryOf: () => flakyDelete, report, startedAt })
+await flakyDeleteLedger.mount('session-e', cwd('2026-10-27', '10-00-07'))
+let deleteAttempts = 0
+const baseDelete = flakyDelete.delete
+flakyDelete.delete = async (id) => {
+  deleteAttempts += 1
+  if (deleteAttempts === 1) throw new Error('transient delete')
+  return await baseDelete(id)
+}
+await flakyDeleteLedger.unmount('session-e')
+expect('删除失败后保留账本以便重试', flakyDeleteLedger.handles('session-e') === true)
+await flakyDeleteLedger.unmount('session-e')
+expect('重试删除后账本清空', flakyDeleteLedger.handles('session-e') === false)
 
 // 按 workspaceId 卸载
 const mountedId = registry.workspaces.find((workspace) => workspace.sessionIds.includes('session-a')).id

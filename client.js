@@ -175,14 +175,17 @@ window.__ModuleLoader__.load({
       return `${root}${sep}${date}${sep}${time}`
     }
 
-    /** Path form a lexical comparison can use: slashes, no trailing slash, case-folded. */
-    const normalizePath = (path) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    /** Path form a lexical comparison can use: slashes, no trailing slash, case folded where the Host does. */
+    const normalizePath = (path, foldCase = true) => {
+      const slashed = path.replace(/\\/g, '/').replace(/\/+$/, '')
+      return foldCase ? slashed.toLowerCase() : slashed
+    }
 
     /** Whether one cwd is exactly a task folder under `root`. */
-    function isTaskCwd(cwd, root) {
+    function isTaskCwd(cwd, root, foldCase = true) {
       if (typeof cwd !== 'string' || cwd === '' || root === undefined) return false
-      const base = normalizePath(root)
-      const target = normalizePath(cwd)
+      const base = normalizePath(root, foldCase)
+      const target = normalizePath(cwd, foldCase)
       if (base === '' || !target.startsWith(base + '/')) return false
       return TASK_DIR_PATTERN.test(target.slice(base.length + 1))
     }
@@ -198,22 +201,22 @@ window.__ModuleLoader__.load({
     /**
      * Create the ungrouped session, wait for the Host's mount, open it.
      * @param deps Context, translator, and the task-folder setting reader.
-     * @returns the chip action, the page-local mount ledger, and the home reader.
+     * @returns the chip action, the page-local mount ledger, the home reader, and current-session adoption.
      */
     function createSessionFlow({ ctx, t, readDefaultDir }) {
-      /** Mounts this page created or re-adopted, keyed by session id. */
+      /** Mounts this page created or re-adopted: sessionId -> { at, adopted, workspaceId? }. */
       const tracked = new Map()
 
-      /** Cached host home: `$host` facts are fixed for the page load. */
+      /** Host home; only a resolved value is cached, so an early undefined call retries. */
       let home
-      let homeKnown = false
       const hostHome = () => {
-        if (!homeKnown) {
-          homeKnown = true
-          try { home = ctx.remote && ctx.remote.$host ? ctx.remote.$host.home : undefined } catch { home = undefined }
-        }
+        if (home !== undefined) return home
+        try { home = ctx.remote && ctx.remote.$host ? ctx.remote.$host.home : undefined } catch { home = undefined }
         return home
       }
+
+      /** Case folding follows the Host platform: Windows paths are case-insensitive. */
+      const foldCase = () => (hostHome() === undefined ? true : hostHome().includes('\\'))
 
       /**
        * The task-folder root this half and the Host share: the configured
@@ -229,18 +232,22 @@ window.__ModuleLoader__.load({
         return root === '' ? undefined : root
       }
 
+      /** The workspace currently holding this session, if any. */
+      const workspaceHolding = (sessionId) => ctx.workspaces.list.getSnapshot().items
+        .find((item) => item.sessionIds.includes(sessionId))
+
       /** Whether some workspace currently holds this session. */
-      const isMounted = (sessionId) => ctx.workspaces.list.getSnapshot().items.some((item) => item.sessionIds.includes(sessionId))
+      const isMounted = (sessionId) => workspaceHolding(sessionId) !== undefined
 
       /** Whether a task folder is already used by another session or mount. */
       const cwdInUse = (cwd) => {
-        const key = normalizePath(cwd)
+        const key = normalizePath(cwd, foldCase())
         const list = ctx.sessions.list.getSnapshot()
         for (const id of list.ids) {
           const row = list.byId[id]
-          if (typeof row?.cwd === 'string' && row.cwd !== '' && normalizePath(row.cwd) === key) return true
+          if (typeof row?.cwd === 'string' && row.cwd !== '' && normalizePath(row.cwd, foldCase()) === key) return true
         }
-        return ctx.workspaces.list.getSnapshot().items.some((item) => normalizePath(item.path) === key)
+        return ctx.workspaces.list.getSnapshot().items.some((item) => normalizePath(item.path, foldCase()) === key)
       }
 
       /** Resolve on the next local wall-clock second, so two clicks never share one folder. */
@@ -275,6 +282,20 @@ window.__ModuleLoader__.load({
         if (done) stop()
       })
 
+      /**
+       * Open a tracked session and latch its adoption, so leaving it retires the
+       * mount on the spot instead of waiting out the creation window.
+       * @param sessionId Session to open.
+       * @param workspaceId Mount recorded for it, when known.
+       */
+      const openTracked = (sessionId, workspaceId) => {
+        const state = tracked.get(sessionId) ?? { at: Date.now(), adopted: false }
+        state.adopted = true
+        if (workspaceId !== undefined) state.workspaceId = workspaceId
+        tracked.set(sessionId, state)
+        ctx.uiWorkspace.openSession(sessionId)
+      }
+
       /** Create a session in a fresh task folder, track its mount, then open it. */
       const createUngrouped = async () => {
         const root = taskRoot()
@@ -291,8 +312,24 @@ window.__ModuleLoader__.load({
         // during the create call, and the sweep must already own the row.
         tracked.set(sessionId, { at: Date.now(), adopted: false })
         await waitForWorkspaceMount(sessionId)
-        ctx.uiWorkspace.openSession(sessionId)
+        openTracked(sessionId, workspaceHolding(sessionId)?.workspaceId)
         return sessionId
+      }
+
+      /**
+       * Adopt the current session without a click. After a hard refresh the page's
+       * ledger is empty while the Host still holds the mount, so leaving it must
+       * retire that mount like any other abandoned scratch session.
+       * @param list Session list snapshot.
+       * @param current Current session id.
+       */
+      const adoptCurrent = (list, current) => {
+        if (current === undefined || tracked.has(current)) return
+        const summary = list.byId[current]
+        if (summary?.blank !== true || !isTaskCwd(summary.cwd, taskRoot(), foldCase())) return
+        const workspace = workspaceHolding(current)
+        if (workspace === undefined) return
+        tracked.set(current, { at: Date.now(), adopted: true, workspaceId: workspace.workspaceId })
       }
 
       /**
@@ -307,11 +344,12 @@ window.__ModuleLoader__.load({
         const summary = current === undefined ? undefined : list.byId[current]
         if (current !== undefined && summary?.blank === true) {
           if (tracked.has(current)) {
-            ctx.uiWorkspace.openSession(current)
+            openTracked(current)
             return current
           }
-          if (isTaskCwd(summary.cwd, taskRoot()) && isMounted(current)) {
-            tracked.set(current, { at: Date.now(), adopted: false })
+          const workspace = workspaceHolding(current)
+          if (isTaskCwd(summary.cwd, taskRoot(), foldCase()) && workspace !== undefined) {
+            tracked.set(current, { at: Date.now(), adopted: true, workspaceId: workspace.workspaceId })
             ctx.uiWorkspace.openSession(current)
             return current
           }
@@ -319,7 +357,7 @@ window.__ModuleLoader__.load({
         return await createUngrouped()
       }
 
-      return { tracked, start, hostHome }
+      return { tracked, start, hostHome, adoptCurrent }
     }
 
     // ---- MOUNT-RETIRE -------------------------------------------------
@@ -327,15 +365,22 @@ window.__ModuleLoader__.load({
      * Abandon the mounts this page opened and never used. Ordinary retirement
      * belongs to the Host (first user message) and empty folders are reclaimed
      * by its startup pass.
-     * @param deps Context and the page-local mount ledger owned by the session flow.
+     * @param deps Context, the page-local mount ledger, and current-session adoption.
      * @returns the reconciler driven by the session and workspace stores.
      */
-    function createMountRetire({ ctx, tracked }) {
-      /** Forget one ledger row and drop the workspace that still holds it. */
+    function createMountRetire({ ctx, tracked, adoptCurrent }) {
+      /**
+       * Forget one ledger row and, only with the recorded workspace id, the mount
+       * that still holds it — never a workspace found by membership alone, which
+       * could be the operator's own.
+       */
       const retire = (sessionId) => {
+        const state = tracked.get(sessionId)
         tracked.delete(sessionId)
-        const workspace = ctx.workspaces.list.getSnapshot().items.find((item) => item.sessionIds.includes(sessionId))
-        if (workspace === undefined) return
+        if (state?.workspaceId === undefined) return
+        const workspace = ctx.workspaces.list.getSnapshot().items
+          .find((item) => item.workspaceId === state.workspaceId)
+        if (workspace === undefined || !workspace.sessionIds.includes(sessionId)) return
         void ctx.workspaces.delete(workspace.workspaceId).catch(() => { /* already removed by the Host or another page */ })
       }
 
@@ -343,11 +388,13 @@ window.__ModuleLoader__.load({
        * The current session marks its row adopted; a non-current row is retired
        * once it left the creation window and either turned non-blank (the Host's
        * retirement did not run) or was adopted, or grew older than the minimum.
+       * An adopted row retires as soon as the operator moves away.
        */
       const sweep = () => {
-        if (tracked.size === 0) return
         const sessions = ctx.sessions.list.getSnapshot()
         const current = mainSessionId(sessions)
+        adoptCurrent(sessions, current)
+        if (tracked.size === 0) return
         const now = Date.now()
         for (const [sessionId, state] of [...tracked]) {
           if (sessionId === current) {
@@ -355,9 +402,9 @@ window.__ModuleLoader__.load({
             continue
           }
           const age = now - state.at
-          if (age < ADOPTION_WINDOW_MS) continue
+          if (!state.adopted && age < ADOPTION_WINDOW_MS) continue
           const blank = sessions.byId[sessionId]?.blank === true
-          if (blank && !state.adopted && age < MOUNT_MIN_AGE_MS) continue
+          if (!state.adopted && blank && age < MOUNT_MIN_AGE_MS) continue
           retire(sessionId)
         }
       }
@@ -531,7 +578,7 @@ window.__ModuleLoader__.load({
       }
 
       const session = createSessionFlow({ ctx, t, readDefaultDir })
-      const { sweep } = createMountRetire({ ctx, tracked: session.tracked })
+      const { sweep } = createMountRetire({ ctx, tracked: session.tracked, adoptCurrent: session.adoptCurrent })
       ctx.effect(() => {
         const stopSessions = ctx.sessions.list.subscribe(sweep)
         const stopWorkspaces = ctx.workspaces.list.subscribe(sweep)

@@ -8,7 +8,7 @@
  */
 import { readdir, realpath, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 /** `<date>` segment of a task folder. */
 export const DATE_FOLDER = /^\d{4}-\d{2}-\d{2}$/
@@ -109,29 +109,7 @@ export function isTaskFolder(root, path) {
 }
 
 /**
- * Remove one empty task folder and, once that empties, its date folder.
- *
- * Only a path in the task-folder shape is considered: `rmdir` refuses a
- * non-empty directory, so a folder the agent wrote into is never touched.
- * @param cwd - A task folder to reclaim.
- */
-export async function removeEmptyTaskFolder(cwd) {
-  const folder = resolve(cwd)
-  if (!TIME_FOLDER.test(basename(folder)) || !DATE_FOLDER.test(basename(dirname(folder)))) return
-  try {
-    await rmdir(folder)
-  } catch {
-    return
-  }
-  try {
-    await rmdir(dirname(folder))
-  } catch {
-    /* still holds other task folders */
-  }
-}
-
-/**
- * Reclaim the empty task folders that no live session uses any more.
+ * Reclaim the empty task folders that no live or persisted session uses any more.
  *
  * `rmdir` refuses a non-empty directory, so a directory holding files is always
  * left as it is; a date folder is removed only once its last task folder is gone.

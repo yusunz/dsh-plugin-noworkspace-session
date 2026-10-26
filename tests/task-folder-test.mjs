@@ -1,13 +1,13 @@
 /**
- * 任务目录形状与磁盘回收的纯函数测试（不依赖 cordis ctx）。
+ * 任务目录形状、路径归一与启动清扫的纯函数测试（不依赖 cordis ctx）。
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
+  canonicalPath,
   isTaskFolder,
   normalizePath,
-  removeEmptyTaskFolder,
   sweepEmptyTaskFolders,
   taskFolderRoot,
 } from '../src/task-folder.js'
@@ -39,38 +39,29 @@ if (process.platform === 'win32') {
 }
 expect('normalizePath 统一分隔符', normalizePath(valid).includes('/') === true)
 
-// ---- 单目录回收：空目录连空日期目录一起删 ----
-const lonelyDate = join(base, '2026-10-31')
-const lonely = join(lonelyDate, '10-00-00')
-mkdirSync(lonely, { recursive: true })
-await removeEmptyTaskFolder(lonely)
-expect('空任务目录被删', !existsSync(lonely))
-expect('随之变空的日期目录也被删', !existsSync(lonelyDate))
-
-// ---- 单目录回收：有内容的、形状不符的都不动 ----
-const sharedDate = join(base, '2026-10-28')
-const used = join(sharedDate, '10-00-01')
-const stray = join(base, 'not-a-task-folder')
-mkdirSync(used, { recursive: true })
-mkdirSync(stray, { recursive: true })
-writeFileSync(join(used, 'note.txt'), 'x')
-await removeEmptyTaskFolder(used)
-await removeEmptyTaskFolder(stray)
-expect('有内容的任务目录保留', existsSync(used) && existsSync(join(used, 'note.txt')))
-expect('形状不符的目录不动', existsSync(stray))
+// ---- canonicalPath：真实目录经 realpath 归一（8.3 短名/junction 同机制） ----
+mkdirSync(valid, { recursive: true })
+const canonical = await canonicalPath(valid)
+expect('canonicalPath 返回含日期/时间段的归一路径', typeof canonical === 'string'
+  && canonical.includes('2026-10-27') && canonical.includes('09-00-00'))
+expect('canonicalPath 对不存在的路径退回词法归一', await canonicalPath(join(base, 'missing', 'x')) === normalizePath(join(base, 'missing', 'x')))
 
 // ---- 启动清扫 ----
 const sweepBase = join(base, 'sweep')
 const sweepDate = join(sweepBase, '2026-10-29')
 const sweepLive = join(sweepDate, '11-00-01')
+const sweepPersisted = join(sweepDate, '11-00-03')
 mkdirSync(join(sweepDate, '11-00-00'), { recursive: true })
 mkdirSync(sweepLive, { recursive: true })
+mkdirSync(sweepPersisted, { recursive: true })
 mkdirSync(join(sweepDate, '11-00-02'), { recursive: true })
 writeFileSync(join(sweepDate, '11-00-02', 'keep.txt'), 'x')
 mkdirSync(join(sweepBase, '2026-10-30', '11-00-00'), { recursive: true })
-await sweepEmptyTaskFolders(sweepBase, new Set([normalizePath(sweepLive)]))
+const keep = new Set([normalizePath(sweepLive), normalizePath(sweepPersisted)])
+await sweepEmptyTaskFolders(sweepBase, keep)
 expect('无主空任务目录被清扫', !existsSync(join(sweepDate, '11-00-00')))
-expect('在用的任务目录保留', existsSync(sweepLive))
+expect('live 会话的任务目录保留', existsSync(sweepLive))
+expect('有持久记录的任务目录也保留（resume 不会重建 cwd）', existsSync(sweepPersisted))
 expect('有内容的任务目录保留', existsSync(join(sweepDate, '11-00-02', 'keep.txt')))
 expect('仅剩空子目录的日期目录被清扫', !existsSync(join(sweepBase, '2026-10-30')))
 expect('仍含在用/有内容子目录的日期目录保留', existsSync(sweepDate))

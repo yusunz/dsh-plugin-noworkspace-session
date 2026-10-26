@@ -12,7 +12,7 @@
  * the display prefix as well; it is used only to recognize leftovers of an earlier
  * process, never to decide whether a live mount is ours.
  */
-import { MOUNT_TITLE_PREFIX, isTaskFolder, stamp } from './task-folder.js'
+import { MOUNT_TITLE_PREFIX, isTaskFolder, normalizePath, stamp } from './task-folder.js'
 
 /**
  * Create the ledger over a lazily resolved workspace registry.
@@ -24,8 +24,10 @@ import { MOUNT_TITLE_PREFIX, isTaskFolder, stamp } from './task-folder.js'
 export function createMountLedger({ registryOf, report, startedAt }) {
   /** sessionId -> { workspaceId, cwd } */
   const mounts = new Map()
-  /** Sessions with a mount attempt in flight; the Host announces a session twice. */
-  const pending = new Set()
+  /** sessionId -> in-flight mount attempt; the Host announces a session twice. */
+  const inflight = new Map()
+  /** normalized cwd -> sessionId claiming it; two sessions must never share one mount. */
+  const claims = new Map()
 
   /**
    * Mount one blank task-folder session.
@@ -38,10 +40,32 @@ export function createMountLedger({ registryOf, report, startedAt }) {
    * @param cwd - The session's own task folder.
    * @returns whether the session is now mounted.
    */
-  async function mount(sessionId, cwd) {
-    if (mounts.has(sessionId)) return true
-    if (pending.has(sessionId)) return false
-    pending.add(sessionId)
+  function mount(sessionId, cwd) {
+    if (mounts.has(sessionId)) return Promise.resolve(true)
+    const running = inflight.get(sessionId)
+    if (running !== undefined) return running
+    const key = normalizePath(cwd)
+    const claimant = claims.get(key)
+    if (claimant !== undefined && claimant !== sessionId) {
+      report(`session ${sessionId} stays ungrouped: ${String(cwd)} is already being mounted for another session`)
+      return Promise.resolve(false)
+    }
+    claims.set(key, sessionId)
+    const attempt = mountNow(sessionId, cwd).finally(() => {
+      inflight.delete(sessionId)
+      if (claims.get(key) === sessionId) claims.delete(key)
+    })
+    inflight.set(sessionId, attempt)
+    return attempt
+  }
+
+  /**
+   * The mount attempt itself; `mount` owns de-duplication and claims.
+   * @param sessionId - Session to mount.
+   * @param cwd - The session's own task folder.
+   * @returns whether the session is now mounted.
+   */
+  async function mountNow(sessionId, cwd) {
     try {
       const registry = registryOf()
       if (registry === undefined) {
@@ -74,31 +98,30 @@ export function createMountLedger({ registryOf, report, startedAt }) {
       // "choose a workspace" state, so this is a warning rather than a failure.
       report(`could not mount session ${sessionId} at ${String(cwd)}: ${String(error)}`)
       return false
-    } finally {
-      pending.delete(sessionId)
     }
   }
 
   /**
-   * Retire the temporary workspace of one session (first user message).
+   * Retire the temporary workspace of one session (first user message, disposal).
+   *
+   * The registry deletion runs first: a transient failure keeps the ledger row so
+   * the next event retries instead of leaving a mount nobody owns.
    * @param sessionId - Session whose mount to retire.
    */
   async function unmount(sessionId) {
     const entry = mounts.get(sessionId)
     if (entry === undefined) return
-    mounts.delete(sessionId)
     const registry = registryOf()
-    if (registry === undefined) return
+    if (registry === undefined) {
+      mounts.delete(sessionId)
+      return
+    }
     try {
       await registry.delete(entry.workspaceId)
+      mounts.delete(sessionId)
     } catch (error) {
       report(`could not retire the mount for session ${sessionId}: ${String(error)}`)
     }
-  }
-
-  /** Forget a session without touching the registry (it is already gone). */
-  function forget(sessionId) {
-    mounts.delete(sessionId)
   }
 
   /**
@@ -149,7 +172,6 @@ export function createMountLedger({ registryOf, report, startedAt }) {
     handles: (sessionId) => mounts.has(sessionId),
     mount,
     unmount,
-    forget,
     retireLeftovers,
   }
 }

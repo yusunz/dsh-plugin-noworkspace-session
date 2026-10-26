@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "No-workspace Session",
-    "description": "Create sessions outside any workspace from the new-session workspace menu, with a Codex-style default task folder setting."
+    "description": "Create sessions outside any workspace from the new-session row or the right sidebar's start page, with a Codex-style default task folder setting."
   }
 }

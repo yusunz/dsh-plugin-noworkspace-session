@@ -12,14 +12,14 @@
  *
  * Ownership is split in one direction only:
  * - the Host owns the mount object (create on announcement, delete on first
- *   message), the leftover cleanup, and every filesystem operation;
+ *   message or disposal), the leftover cleanup, and every filesystem operation;
  * - the browser half owns creation, opening, the operator's explicit
  *   abandonment (`workspaces.delete`), and the UI;
  * - cross-half communication is limited to upstream session events, upstream
  *   store subscriptions, and client-to-host commands. The Host never infers a
  *   browser decision, and empty folders are reclaimed only at startup.
  */
-import { isTaskFolder, taskFolderRoot } from './src/task-folder.js'
+import { canonicalPath, canonicalTaskRoot, isTaskFolder, taskFolderRoot } from './src/task-folder.js'
 import { createMountLedger } from './src/mounts.js'
 import { createDirReader } from './src/settings.js'
 import { createStartupMaintenance } from './src/startup-sweep.js'
@@ -37,7 +37,7 @@ function warn(ctx, message) {
 
 /**
  * Wire the Host half.
- * @param ctx Plugin context; `settings`, `workspaceRegistry`, and `sessions` are optional.
+ * @param ctx Plugin context; `settings`, `workspaceRegistry`, `sessions`, and `sessionPersistence` are optional.
  * @param config Loader-provided config, whose `defaultDir` may be a volatile reference.
  */
 export function apply(ctx, config) {
@@ -59,6 +59,20 @@ export function apply(ctx, config) {
   const maintenance = createStartupMaintenance({ ctx, readDir, ledger, report })
   ctx.effect(() => () => maintenance.dispose(), 'noworkspace-session: startup maintenance')
 
+  /**
+   * Whether a session cwd has the task-folder shape. The lexical check covers the
+   * normal path; the canonical one covers 8.3 short names and junctions, where the
+   * Client's spelling and the registry's realpath differ.
+   * @param root - Effective task-folder root.
+   * @param cwd - Session cwd announced by the upstream event.
+   * @returns whether this cwd is one of ours.
+   */
+  const isOurCwd = async (root, cwd) => {
+    if (isTaskFolder(root, cwd)) return true
+    const [canonicalRoot, canonicalCwd] = await Promise.all([canonicalTaskRoot(root), canonicalPath(cwd)])
+    return canonicalRoot !== undefined && isTaskFolder(canonicalRoot, canonicalCwd)
+  }
+
   // A blank session of ours was announced: mount it while it is still blank,
   // which is both the freshly created case and a scratch session restored at
   // startup. A failed mount is retried by the next announcement of the same
@@ -69,9 +83,13 @@ export function apply(ctx, config) {
     // Subagent and fork children inherit the parent's cwd; they are not ours.
     if (summary.origin !== undefined || summary.parentSessionId !== undefined) return
     if (summary.blank !== true || ledger.handles(summary.sessionId)) return
-    const root = taskFolderRoot(readDir())
-    if (root === undefined || !isTaskFolder(root, summary.cwd)) return
-    void ledger.mount(summary.sessionId, summary.cwd)
+    const sessionId = summary.sessionId
+    const cwd = summary.cwd
+    void (async () => {
+      const root = taskFolderRoot(readDir())
+      if (root === undefined || !await isOurCwd(root, cwd)) return
+      await ledger.mount(sessionId, cwd)
+    })().catch((error) => report(`could not inspect the announcement of ${sessionId}: ${String(error)}`))
   })
 
   // The first user-authored durable message: the mount has done its job and
@@ -84,6 +102,7 @@ export function apply(ctx, config) {
 
   // A disposed session can never be unmounted by its own first message.
   ctx.on('api-session/removed', (sessionId) => {
-    if (typeof sessionId === 'string') ledger.forget(sessionId)
+    if (typeof sessionId !== 'string' || !ledger.handles(sessionId)) return
+    void ledger.unmount(sessionId)
   })
 }
