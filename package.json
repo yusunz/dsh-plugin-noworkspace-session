@@ -45,6 +45,22 @@
     }
   },
   "license": "MIT",
+  "author": "yusunz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yusunz/dsh-plugin-noworkspace-session.git"
+  },
+  "homepage": "https://github.com/yusunz/dsh-plugin-noworkspace-session#readme",
+  "bugs": {
+    "url": "https://github.com/yusunz/dsh-plugin-noworkspace-session/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "workspace"
+  ],
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.5"
   }
